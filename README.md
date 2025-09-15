@@ -12,5 +12,4 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/hoangvh/scripts/refs/head
 
 Chạy lệnh để kiểm tra quá trình cài đặt lần đầu:
 
-```bash
 journalctl -u miva-setup.service -f
