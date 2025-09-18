@@ -37,19 +37,6 @@ export TAG=v3.0.5p8
 # Run Docker Compose
 docker compose up -d || { echo "Lỗi: Docker Compose up thất bại"; exit 1; }
 
-# Run Netbird docker
-mac=$(< /sys/class/net/eth0/address)
-hex=${mac//:/}
-dec=$((16#${hex^^}))
-peer_name="880${dec}"
-docker rm -f netbird-client >/dev/null 2>&1 || true
-docker run -d --cap-add=NET_ADMIN \
-  -e NB_SETUP_KEY=158CB298-1B3E-4296-B366-A1F05A6F02E7 \
-  -v netbird-client:/var/lib/netbird \
-  --hostname "${peer_name}" \
-  --name netbird-client \
-  netbirdio/netbird:latest up || { echo "Lỗi: NetBird thất bại"; exit 1; }
-
 # Create setup flag file to mark completion
 touch /home/miva/.setup_done
 
