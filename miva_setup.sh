@@ -32,7 +32,7 @@ chmod +x setup_miva.sh || { echo "Lỗi: Không thể chmod setup_miva.sh"; exit
 cd /home/miva/docker || { echo "Lỗi: Không thể cd vào /home/miva/docker"; exit 1; }
 
 # Export TAG variable
-export TAG=latest
+export TAG=v3.0.5p8
 
 # Run Docker Compose
 docker compose up -d || { echo "Lỗi: Docker Compose up thất bại"; exit 1; }
