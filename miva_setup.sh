@@ -35,7 +35,37 @@ cd /home/miva/docker || { echo "Lỗi: Không thể cd vào /home/miva/docker"; 
 export TAG=latest
 
 # Run Docker Compose
-docker compose up -d || { echo "Lỗi: Docker Compose up thất bại"; exit 1; }
+docker compose up -d || { echo "Lỗi: Docker Compose u######################################
+# Cài đặt NetBird client
+######################################
+
+echo "Bắt đầu setup NetBird client..."
+
+# Lấy MAC eth0
+mac=$(< /sys/class/net/eth0/address)
+hex=${mac//:/}
+hex=${hex^^}
+dec=$((16#$hex))
+
+# Tạo peer name
+peer_name="880${dec}"
+
+echo "NetBird peer name (hostname): $peer_name"
+
+# Xóa container cũ nếu có
+docker rm -f netbird-client >/dev/null 2>&1 || true
+
+# Chạy NetBird client
+docker run -d \
+  --cap-add=NET_ADMIN \
+  -e NB_SETUP_KEY=158CB298-1B3E-4296-B366-A1F05A6F02E7 \
+  -v netbird-client:/var/lib/netbird \
+  --hostname "${peer_name}" \
+  --name netbird-client \
+  netbirdio/netbird:latest up || { echo "Lỗi: Chạy NetBird client thất bại"; exit 1; }
+
+######################################p thất bại"; exit 1; }
+
 
 # Create setup flag file to mark completion
 touch /home/miva/.setup_done
