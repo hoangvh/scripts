@@ -34,6 +34,11 @@ cd /home/miva/docker || { echo "Lỗi: Không thể cd vào /home/miva/docker"; 
 # Export TAG variable
 export TAG=latest
 
+# Bổ sung cấu hình mạng trước khi chạy Docker Compose
+nmcli connection modify "netplan-usb0" ipv4.ignore-auto-dns yes || { echo "Lỗi: Không thể modify ignore-auto-dns cho netplan-usb0"; exit 1; }
+nmcli connection modify "netplan-usb0" ipv4.dns "8.8.8.8 8.8.4.4" || { echo "Lỗi: Không thể modify DNS cho netplan-usb0"; exit 1; }
+nmcli con up "netplan-usb0" || { echo "Lỗi: Không thể up connection netplan-usb0"; exit 1; }
+
 # Run Docker Compose
 docker compose up -d || { echo "Lỗi: Docker Compose up thất bại"; exit 1; }
 
