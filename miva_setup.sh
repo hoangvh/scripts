@@ -65,7 +65,8 @@ fi
 
 if chronyc tracking | grep -q "Not synchronised"; then
     log "Thời gian chưa sync, ép sync ngay..."
-    retry_cmd "chronyd -q 'server 0.asia.pool.ntp.org iburst' 'server 1.asia.pool.ntp.org iburst' 'server time.google.com iburst'" "chrony sync"
+    retry_cmd "chronyc add server 0.asia.pool.ntp.org iburst && chronyc add server 1.asia.pool.ntp.org iburst && chronyc add server time.google.com iburst" "add NTP servers"
+    retry_cmd "chronyc burst 4/4" "chrony burst"
     chronyc makestep
     sleep 10
 fi
