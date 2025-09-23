@@ -51,6 +51,10 @@ else
     fi
 fi
 
+# Download hw_test
+log "Tải hw_test..."
+retry_cmd "curl -fsSL https://raw.githubusercontent.com/hoangvh/miva-hw-test/refs/heads/main/hw_test -o /usr/local/bin/hw_test && chmod +x /usr/local/bin/hw_test" "Download hw_test"
+
 # Kiểm tra đồng bộ thời gian
 log "Kiểm tra đồng bộ thời gian..."
 if ! chronyc tracking | grep -q "Stratum"; then
