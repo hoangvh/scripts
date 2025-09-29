@@ -35,7 +35,16 @@ fi
 
 cd /home || { log "❌ Không thể cd vào /home"; exit 1; }
 
-# Clone or update repository
+# Install dependencies (full Xorg + Openbox)
+log "Cài đặt các gói dependency cần thiết (full Xorg + Openbox)..."
+retry_cmd "apt-get update -y" "apt-get update"
+retry_cmd "DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    git curl wget unzip xz-utils ca-certificates \
+    xorg openbox x11-utils x11-xserver-utils xinit dbus-x11" "Cài đặt Xorg + Openbox"
+
+log "✅ Cài đặt Xorg và Openbox hoàn tất."
+
+# Clone or update repositoryuzi    
 if [ ! -d "/home/miva/.git" ]; then
     log "Repo miva chưa có, tiến hành clone..."
     rm -rf /home/miva
@@ -55,30 +64,21 @@ fi
 log "Tải hw_test..."
 retry_cmd "curl -fsSL https://raw.githubusercontent.com/hoangvh/miva-hw-test/refs/heads/main/hw_test -o /usr/local/bin/hw_test && chmod +x /usr/local/bin/hw_test" "Download hw_test"
 
-
-# Set timezone
-log "Đặt timezone về Asia/Ho_Chi_Minh..."
-timedatectl set-timezone Asia/Ho_Chi_Minh
-
-# Kiểm tra đồng bộ thời gian
-log "Kiểm tra đồng bộ thời gian..."
-if ! chronyc tracking | grep -q "Stratum"; then
-    log "Khởi động lại chrony..."
-    systemctl restart chrony
-    sleep 5
-fi
-
-if chronyc tracking | grep -q "Not synchronised"; then
-    log "Thời gian chưa sync, ép sync ngay..."
-    retry_cmd "chronyc add server 0.asia.pool.ntp.org iburst && chronyc add server 1.asia.pool.ntp.org iburst && chronyc add server time.google.com iburst" "add NTP servers"
-    retry_cmd "chronyc burst 4/4" "chrony burst sync"
-    chronyc makestep
-    sleep 10
-fi
-
-if chronyc tracking | grep -q "Not synchronised"; then
-    log "❌ Không thể đồng bộ thời gian. Dừng lại."
-    exit 1
+# Kiểm tra thời gian hệ thống so với RTC
+log "Kiểm tra thời gian hệ thống và RTC..."
+if hwclock --verbose >/dev/null 2>&1; then
+    SYS_TIME=$(date '+%s')
+    RTC_TIME=$(hwclock --get | xargs -I{} date -d "{}" '+%s')
+    DIFF=$(( SYS_TIME - RTC_TIME ))
+    if [ ${DIFF#-} -gt 30 ]; then
+        log "⏱ Thời gian lệch > 30s, thực hiện đồng bộ..."
+        retry_cmd "hwclock --hctosys" "Đồng bộ RTC -> system time"
+        retry_cmd "chronyc makestep" "Đồng bộ NTP tức thì"
+    else
+        log "✅ Thời gian hệ thống và RTC gần đúng, bỏ qua đồng bộ."
+    fi
+else
+    log "⚠️ Không phát hiện RTC hoặc hwclock lỗi, bỏ qua đồng bộ."
 fi
 
 # Run setup script
@@ -86,18 +86,12 @@ cd /home/miva/setup || { log "❌ Không thể cd vào setup"; exit 1; }
 chmod +x setup_miva.sh
 retry_cmd "./setup_miva.sh" "setup_miva.sh"
 
-# Network config
+# Docker compose
 cd /home/miva/docker || { log "❌ Không thể cd vào docker"; exit 1; }
 export TAG=latest
-
-retry_cmd "netplan apply" "netplan apply"
-retry_cmd "nmcli connection modify 'netplan-usb0' ipv4.ignore-auto-dns yes" "nmcli modify ignore-auto-dns"
-retry_cmd "nmcli connection modify 'netplan-usb0' ipv4.dns '8.8.8.8 8.8.4.4'" "nmcli set DNS"
-retry_cmd "nmcli con up 'netplan-usb0'" "nmcli con up"
-
-# Docker compose
 retry_cmd "docker compose up -d" "docker compose up"
 
 # Mark setup done
 touch /home/miva/.setup_done
 log "=== Miva setup hoàn tất ==="
+echo "🎉 Miva setup completed! Xorg + Openbox ready, video display và window management có thể sử dụng."
