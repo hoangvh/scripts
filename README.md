@@ -1,16 +1,12 @@
 # 📜 Scripts
 
 Tập hợp các script cài đặt **MIVA**, **MIRA**.
-
 ---
-
 ## 🔑 Truy cập mặc định
 - SSH vào thiết bị với IP: **192.168.11.102**
-
 ---
-
-## 🚀 Cài đặt Miva
+## 🚀 MIVA, kiểm tra nhanh phần cứng: HDMI, Audio output 3.5 jack, Relays
 Chạy lệnh sau trong terminal:
-
 ```bash
-bash -c "$(wget -qO- https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_setup.sh)"
+curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_hw_test -o /usr/local/bin/hw_test && chmod +x /usr/local/bin/hw_test
+hw_test
