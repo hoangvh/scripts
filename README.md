@@ -1,9 +1,7 @@
-# 📜 Scripts
-
-Tập hợp các script cài đặt **MIVA**, **MIRA**.
+# 📜 Scripts MIVA, MIRA, SGW (Allwiner H618)
 ---
-## 🔑 Truy cập mặc định
-- SSH vào thiết bị với IP: **192.168.11.102**
+## 🔑 Remote SSH
+- Địa chỉ IP mặc định: **192.168.11.102**
 ---
 ## 🚀 MIVA, kiểm tra nhanh phần cứng: HDMI, Audio output 3.5 jack, Relays
 Chạy lệnh sau trong terminal:
