@@ -1,86 +1,118 @@
 #!/bin/bash
 
+# ==============================
+# MIVA HARDWARE TEST SCRIPT
+# ==============================
+# Features:
+# - Timestamped log files (YYMMDD_HHMMSS)
+# - PASS / FAIL / NOT DONE status with colors
+# - Google Sheet push with status
+# - Menu-based interface
+# ==============================
+
 LOG_DIR="/root/test_logs"
 mkdir -p "$LOG_DIR"
 
 VIDEO_URL="https://github.com/hoangvh/miva-hw-test/releases/download/v250923.01/ALPS.DOLOMITES.4K.UHD.mp4"
 
+# ------------------------------
 # Colors
+# ------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# ======================
-# Timestamp helper
-# ======================
+# ------------------------------
+# Timestamp helpers
+# ------------------------------
 timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
 }
 
-# ==== STATUS TABLE ====
+timestamp_file() {
+    date '+%y%m%d_%H%M%S'
+}
+
+# ------------------------------
+# Logging helper
+# ------------------------------
+mark_done() {
+    local item=$1
+    local status=$2
+    local ts=$(timestamp_file)
+    touch "$LOG_DIR/${ts}_${item}_done"
+    echo "$(timestamp) ${item^^} $status" >> "$LOG_DIR/test_log.txt"
+}
+
+# ------------------------------
+# Status table
+# ------------------------------
 check_flags() {
     clear
     echo -e "=============================="
     echo -e "       ${YELLOW}MIVA HARDWARE TEST${NC}"
     echo -e "=============================="
-    printf "%-20s | %-10s\n" "Test Item" "Status"
-    echo "------------------------------"
+    printf "%-25s | %-10s\n" "Test Item" "Status"
+    echo "-------------------------------"
 
+    # chỉ check 4 phần cứng
+    all_passed=1
     for item in hdmi audiojack relay led; do
-        status_file="$LOG_DIR/.${item}_done"
-        if [[ -f "$status_file" ]]; then
+        done_file=$(ls "$LOG_DIR" 2>/dev/null | grep -E "[0-9]{6}_[0-9]{6}_${item}_done" | sort | tail -1)
+        if [[ -n "$done_file" ]]; then
             status=$(grep -Eo "${item^^} (PASS|FAIL)" "$LOG_DIR/test_log.txt" | tail -1 | awk '{print $2}')
             [[ -z "$status" ]] && status="FAIL"
-            [[ $status == "PASS" ]] && color=$GREEN || color=$RED
-            printf "%-20s | ${color}%-10s${NC}\n" "${item^} test" "$status"
         else
-            printf "%-20s | ${YELLOW}%-10s${NC}\n" "${item^} test" "NOT DONE"
+            status="NOT DONE"
         fi
+
+        case $status in
+            PASS) color=$GREEN ;;
+            FAIL) color=$RED; all_passed=0 ;;
+            NOT\ DONE) color=$YELLOW; all_passed=0 ;;
+        esac
+
+        printf "%-25s | ${color}%-10s${NC}\n" "${item^} test" "$status"
     done
 
-    echo "=============================="
+    # thêm mục số 6 Push Google Sheet
+    push_file=$(ls "$LOG_DIR" 2>/dev/null | grep -E "[0-9]{6}_[0-9]{6}_push_done" | sort | tail -1)
+    if [[ -n "$push_file" ]]; then
+        push_status="DONE"
+        color=$GREEN
+    else
+        push_status="NOT DONE"
+        color=$YELLOW
+    fi
+    printf "%-25s | ${color}%-10s${NC}\n" "Push Google Sheet" "$push_status"
 
-    # Kiểm tra trạng thái tổng thể
-    if [[ -f "$LOG_DIR/.hdmi_done" && -f "$LOG_DIR/.audiojack_done" && -f "$LOG_DIR/.relay_done" && -f "$LOG_DIR/.led_done" ]]; then
-        fail_count=$(grep -E "FAIL" "$LOG_DIR/test_log.txt" | wc -l)
-        if [[ $fail_count -eq 0 ]]; then
-            touch "$LOG_DIR/all_done"
-            echo -e "${GREEN}>>> ALL TESTS COMPLETED <<<${NC}"
-        else
-            rm -f "$LOG_DIR/all_done" 2>/dev/null
-            echo -e "${YELLOW}>>> Some tests failed <<<${NC}"
-        fi
+    echo "=============================="
+    if [[ $all_passed -eq 1 ]]; then
+        touch "$LOG_DIR/all_done"
+        echo -e "${GREEN}>>> ALL HARDWARE TESTS COMPLETED <<<${NC}"
     else
         rm -f "$LOG_DIR/all_done" 2>/dev/null
-        echo -e "${YELLOW}>>> Some tests are still pending <<<${NC}"
+        echo -e "${RED}>>> Some hardware tests FAILED or NOT DONE <<<${NC}"
     fi
     echo "=============================="
 }
 
-# ==== TEST FUNCTIONS ====
+# ------------------------------
+# Test functions
+# ------------------------------
 run_hdmi_test() {
     echo -e "$(timestamp) ${YELLOW}[HDMI TEST] Starting...${NC}"
     DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:2,0 "$VIDEO_URL"
     read -rp "$(timestamp) HDMI test done? (Y/N): " ans
-    touch "$LOG_DIR/.hdmi_done"
-    if [[ $ans =~ ^[Yy]$ ]]; then
-        echo "$(timestamp) HDMI PASS" >> "$LOG_DIR/test_log.txt"
-    else
-        echo "$(timestamp) HDMI FAIL" >> "$LOG_DIR/test_log.txt"
-    fi
+    [[ $ans =~ ^[Yy]$ ]] && mark_done "hdmi" "PASS" || mark_done "hdmi" "FAIL"
 }
 
 run_audiojack_test() {
     echo -e "$(timestamp) ${YELLOW}[Audio Jack TEST] Starting...${NC}"
     DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:1,0 "$VIDEO_URL"
     read -rp "$(timestamp) Audio Jack test done? (Y/N): " ans
-    touch "$LOG_DIR/.audiojack_done"
-    if [[ $ans =~ ^[Yy]$ ]]; then
-        echo "$(timestamp) AUDIOJACK PASS" >> "$LOG_DIR/test_log.txt"
-    else
-        echo "$(timestamp) AUDIOJACK FAIL" >> "$LOG_DIR/test_log.txt"
-    fi
+    [[ $ans =~ ^[Yy]$ ]] && mark_done "audiojack" "PASS" || mark_done "audiojack" "FAIL"
 }
 
 run_relay_test() {
@@ -95,6 +127,7 @@ run_relay_test() {
     echo 1 > /sys/class/gpio/gpio209/value
     read -rp "$(timestamp) Did Relay 1 turn ON? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
     echo 0 > /sys/class/gpio/gpio209/value
     echo 1 > /sys/class/gpio/gpio211/value; sleep 1; echo 0 > /sys/class/gpio/gpio211/value
     read -rp "$(timestamp) Did Relay 1 turn OFF? (Y/N): " ans
@@ -104,17 +137,17 @@ run_relay_test() {
     echo 1 > /sys/class/gpio/gpio210/value
     read -rp "$(timestamp) Did Relay 2 turn ON? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
     echo 0 > /sys/class/gpio/gpio210/value
     echo 1 > /sys/class/gpio/gpio208/value; sleep 1; echo 0 > /sys/class/gpio/gpio208/value
     read -rp "$(timestamp) Did Relay 2 turn OFF? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
 
-    touch "$LOG_DIR/.relay_done"
     if [[ $success -eq 1 ]]; then
-        echo "$(timestamp) RELAY PASS" >> "$LOG_DIR/test_log.txt"
+        mark_done "relay" "PASS"
         echo -e "$(timestamp) ${GREEN}Relay test PASS${NC}"
     else
-        echo "$(timestamp) RELAY FAIL" >> "$LOG_DIR/test_log.txt"
+        mark_done "relay" "FAIL"
         echo -e "$(timestamp) ${RED}Relay test FAIL${NC}"
     fi
 }
@@ -133,25 +166,34 @@ run_led_test() {
         echo out > /sys/class/gpio/gpio$gpio/direction
     done
 
-    success=1
     for i in {1..5}; do
         for gpio in "${!LEDS[@]}"; do echo 1 > /sys/class/gpio/gpio$gpio/value; done
         sleep 0.5
         for gpio in "${!LEDS[@]}"; do echo 0 > /sys/class/gpio/gpio$gpio/value; done
         sleep 0.5
     done
+
     read -rp "$(timestamp) Were all LEDs blinking correctly? (Y/N): " ans
-    touch "$LOG_DIR/.led_done"
-    if [[ $ans =~ ^[Yy]$ ]]; then
-        echo "$(timestamp) LED PASS" >> "$LOG_DIR/test_log.txt"
-    else
-        echo "$(timestamp) LED FAIL" >> "$LOG_DIR/test_log.txt"
-    fi
+    [[ $ans =~ ^[Yy]$ ]] && mark_done "led" "PASS" || mark_done "led" "FAIL"
 }
 
-# ==== Google Sheet Push ====
+# ------------------------------
+# Auto-run all tests
+# ------------------------------
+run_auto_test() {
+    run_hdmi_test
+    run_audiojack_test
+    run_relay_test
+    run_led_test
+}
+
+# ------------------------------
+# Google Sheet Push
+# ------------------------------
 push_to_google_sheet() {
     check_flags
+    echo -e "${YELLOW}Pushing data to Google Sheet...${NC}"
+
     local container_name="miva"
     local max_retries=3
     local sleep_between=5
@@ -159,13 +201,14 @@ push_to_google_sheet() {
 
     if ! docker ps --filter "name=$container_name" --filter "status=running" --format "{{.Names}}" | grep -q "$container_name"; then
         echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Container $container_name chưa chạy, cannot push.${NC}"
+        mark_done "push" "FAIL"
         return 1
     fi
 
     if [[ -f "$LOG_DIR/all_done" ]]; then
-        echo -e "$(timestamp) ${YELLOW}[GOOGLE SHEET] All tests done, pushing data...${NC}"
+        echo -e "$(timestamp) ${YELLOW}[GOOGLE SHEET] All hardware tests done, pushing data...${NC}"
     else
-        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Not all tests done!${NC}"
+        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Some hardware tests NOT DONE or FAILED!${NC}"
         read -p "Do you want to continue push anyway? (y/N): " answer
         if [[ ! "$answer" =~ ^[Yy]$ ]]; then
             echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Push canceled by user.${NC}"
@@ -177,25 +220,22 @@ push_to_google_sheet() {
     local cmd=(docker exec -i -u0 "$container_name" mgwp_info -u miva)
     until "${cmd[@]}" 2>&1 | while IFS= read -r line; do echo "$(timestamp) $line"; done; do
         if [ $attempt -ge $max_retries ]; then
-            echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data thất bại sau $max_retries lần thử${NC}"
+            echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data failed after $max_retries tries${NC}"
+            mark_done "push" "FAIL"
             return 1
         fi
-        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data thất bại (attempt $attempt), retrying in $sleep_between sec...${NC}"
+        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data failed (attempt $attempt), retrying in $sleep_between sec...${NC}"
         attempt=$((attempt+1))
         sleep $sleep_between
     done
 
     echo -e "$(timestamp) ${GREEN}[GOOGLE SHEET] Data pushed successfully!${NC}"
+    mark_done "push" "PASS"
 }
 
-run_auto_test() {
-    run_hdmi_test
-    run_audiojack_test
-    run_relay_test
-    run_led_test
-}
-
-# ==== MENU ====
+# ------------------------------
+# MENU
+# ------------------------------
 while true; do
     check_flags
     echo "Select a test option:"
