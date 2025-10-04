@@ -1,4 +1,5 @@
 #!/bin/bash
+
 LOG_DIR="/root/test_logs"
 mkdir -p "$LOG_DIR"
 
@@ -26,19 +27,27 @@ check_flags() {
     printf "%-20s | %-10s\n" "Test Item" "Status"
     echo "------------------------------"
 
-    [[ -f "$LOG_DIR/.hdmi_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "HDMI test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "HDMI test" "NOT DONE"
-    [[ -f "$LOG_DIR/.audiojack_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "Audio Jack test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "Audio Jack test" "NOT DONE"
-    [[ -f "$LOG_DIR/.relay_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "Relay test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "Relay test" "NOT DONE"
-    [[ -f "$LOG_DIR/.led_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "LED test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "LED test" "NOT DONE"
+    for item in hdmi audiojack relay led; do
+        status_file="$LOG_DIR/.${item}_done"
+        if [[ -f "$status_file" ]]; then
+            status=$(grep -Eo "${item^^} (PASS|FAIL)" "$LOG_DIR/test_log.txt" | tail -1 | awk '{print $2}')
+            [[ -z "$status" ]] && status="FAIL"
+            [[ $status == "PASS" ]] && color=$GREEN || color=$RED
+            printf "%-20s | ${color}%-10s${NC}\n" "${item^} test" "$status"
+        else
+            printf "%-20s | ${YELLOW}%-10s${NC}\n" "${item^} test" "NOT DONE"
+        fi
+    done
 
     echo "=============================="
 
-    if [[ -f "$LOG_DIR/.hdmi_done" && -f "$LOG_DIR/.audiojack_done" && -f "$LOG_DIR/.relay_done" && -f "$LOG_DIR/.led_done" ]]; then
+    # Nếu tất cả PASS → all_done
+    if grep -q "PASS" "$LOG_DIR/test_log.txt" && ! grep -q "FAIL" "$LOG_DIR/test_log.txt"; then
         touch "$LOG_DIR/all_done"
         echo -e "${GREEN}>>> ALL TESTS COMPLETED <<<${NC}"
     else
         rm -f "$LOG_DIR/all_done" 2>/dev/null
-        echo -e "${YELLOW}>>> Some tests are still pending <<<${NC}"
+        echo -e "${YELLOW}>>> Some tests are still pending or failed <<<${NC}"
     fi
     echo "=============================="
 }
@@ -48,14 +57,24 @@ run_hdmi_test() {
     echo -e "$(timestamp) ${YELLOW}[HDMI TEST] Starting...${NC}"
     DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:2,0 "$VIDEO_URL"
     read -rp "$(timestamp) HDMI test done? (Y/N): " ans
-    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.hdmi_done"; echo "$(timestamp) HDMI DONE" >> "$LOG_DIR/test_log.txt"; }
+    touch "$LOG_DIR/.hdmi_done"
+    if [[ $ans =~ ^[Yy]$ ]]; then
+        echo "$(timestamp) HDMI PASS" >> "$LOG_DIR/test_log.txt"
+    else
+        echo "$(timestamp) HDMI FAIL" >> "$LOG_DIR/test_log.txt"
+    fi
 }
 
 run_audiojack_test() {
     echo -e "$(timestamp) ${YELLOW}[Audio Jack TEST] Starting...${NC}"
     DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:1,0 "$VIDEO_URL"
     read -rp "$(timestamp) Audio Jack test done? (Y/N): " ans
-    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.audiojack_done"; echo "$(timestamp) Audio Jack DONE" >> "$LOG_DIR/test_log.txt"; }
+    touch "$LOG_DIR/.audiojack_done"
+    if [[ $ans =~ ^[Yy]$ ]]; then
+        echo "$(timestamp) AUDIOJACK PASS" >> "$LOG_DIR/test_log.txt"
+    else
+        echo "$(timestamp) AUDIOJACK FAIL" >> "$LOG_DIR/test_log.txt"
+    fi
 }
 
 run_relay_test() {
@@ -66,28 +85,30 @@ run_relay_test() {
     done
 
     success=1
+    # Relay 1 ON/OFF
     echo 1 > /sys/class/gpio/gpio209/value
     read -rp "$(timestamp) Did Relay 1 turn ON? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
-
     echo 0 > /sys/class/gpio/gpio209/value
     echo 1 > /sys/class/gpio/gpio211/value; sleep 1; echo 0 > /sys/class/gpio/gpio211/value
     read -rp "$(timestamp) Did Relay 1 turn OFF? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
 
+    # Relay 2 ON/OFF
     echo 1 > /sys/class/gpio/gpio210/value
     read -rp "$(timestamp) Did Relay 2 turn ON? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
-
     echo 0 > /sys/class/gpio/gpio210/value
     echo 1 > /sys/class/gpio/gpio208/value; sleep 1; echo 0 > /sys/class/gpio/gpio208/value
     read -rp "$(timestamp) Did Relay 2 turn OFF? (Y/N): " ans
     [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
 
+    touch "$LOG_DIR/.relay_done"
     if [[ $success -eq 1 ]]; then
-        touch "$LOG_DIR/.relay_done"
-        echo -e "$(timestamp) ${GREEN}Relay test DONE${NC}"
+        echo "$(timestamp) RELAY PASS" >> "$LOG_DIR/test_log.txt"
+        echo -e "$(timestamp) ${GREEN}Relay test PASS${NC}"
     else
+        echo "$(timestamp) RELAY FAIL" >> "$LOG_DIR/test_log.txt"
         echo -e "$(timestamp) ${RED}Relay test FAIL${NC}"
     fi
 }
@@ -105,6 +126,8 @@ run_led_test() {
         echo $gpio > /sys/class/gpio/export 2>/dev/null
         echo out > /sys/class/gpio/gpio$gpio/direction
     done
+
+    success=1
     for i in {1..5}; do
         for gpio in "${!LEDS[@]}"; do echo 1 > /sys/class/gpio/gpio$gpio/value; done
         sleep 0.5
@@ -112,9 +135,15 @@ run_led_test() {
         sleep 0.5
     done
     read -rp "$(timestamp) Were all LEDs blinking correctly? (Y/N): " ans
-    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.led_done"; echo "$(timestamp) LED DONE" >> "$LOG_DIR/test_log.txt"; }
+    touch "$LOG_DIR/.led_done"
+    if [[ $ans =~ ^[Yy]$ ]]; then
+        echo "$(timestamp) LED PASS" >> "$LOG_DIR/test_log.txt"
+    else
+        echo "$(timestamp) LED FAIL" >> "$LOG_DIR/test_log.txt"
+    fi
 }
 
+# ==== Google Sheet Push ====
 push_to_google_sheet() {
     check_flags
     local container_name="miva"
