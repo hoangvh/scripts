@@ -41,13 +41,19 @@ check_flags() {
 
     echo "=============================="
 
-    # Nếu tất cả PASS → all_done
-    if grep -q "PASS" "$LOG_DIR/test_log.txt" && ! grep -q "FAIL" "$LOG_DIR/test_log.txt"; then
-        touch "$LOG_DIR/all_done"
-        echo -e "${GREEN}>>> ALL TESTS COMPLETED <<<${NC}"
+    # Kiểm tra trạng thái tổng thể
+    if [[ -f "$LOG_DIR/.hdmi_done" && -f "$LOG_DIR/.audiojack_done" && -f "$LOG_DIR/.relay_done" && -f "$LOG_DIR/.led_done" ]]; then
+        fail_count=$(grep -E "FAIL" "$LOG_DIR/test_log.txt" | wc -l)
+        if [[ $fail_count -eq 0 ]]; then
+            touch "$LOG_DIR/all_done"
+            echo -e "${GREEN}>>> ALL TESTS COMPLETED <<<${NC}"
+        else
+            rm -f "$LOG_DIR/all_done" 2>/dev/null
+            echo -e "${YELLOW}>>> Some tests failed <<<${NC}"
+        fi
     else
         rm -f "$LOG_DIR/all_done" 2>/dev/null
-        echo -e "${YELLOW}>>> Some tests are still pending or failed <<<${NC}"
+        echo -e "${YELLOW}>>> Some tests are still pending <<<${NC}"
     fi
     echo "=============================="
 }
