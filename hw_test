@@ -1,0 +1,185 @@
+#!/bin/bash
+LOG_DIR="/root/test_logs"
+mkdir -p "$LOG_DIR"
+
+VIDEO_URL="https://github.com/hoangvh/miva-hw-test/releases/download/v250923.01/ALPS.DOLOMITES.4K.UHD.mp4"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# ======================
+# Timestamp helper
+# ======================
+timestamp() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
+
+# ==== STATUS TABLE ====
+check_flags() {
+    clear
+    echo -e "=============================="
+    echo -e "       ${YELLOW}MIVA HARDWARE TEST${NC}"
+    echo -e "=============================="
+    printf "%-20s | %-10s\n" "Test Item" "Status"
+    echo "------------------------------"
+
+    [[ -f "$LOG_DIR/.hdmi_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "HDMI test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "HDMI test" "NOT DONE"
+    [[ -f "$LOG_DIR/.audiojack_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "Audio Jack test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "Audio Jack test" "NOT DONE"
+    [[ -f "$LOG_DIR/.relay_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "Relay test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "Relay test" "NOT DONE"
+    [[ -f "$LOG_DIR/.led_done" ]] && printf "%-20s | ${GREEN}%-10s${NC}\n" "LED test" "DONE" || printf "%-20s | ${RED}%-10s${NC}\n" "LED test" "NOT DONE"
+
+    echo "=============================="
+
+    if [[ -f "$LOG_DIR/.hdmi_done" && -f "$LOG_DIR/.audiojack_done" && -f "$LOG_DIR/.relay_done" && -f "$LOG_DIR/.led_done" ]]; then
+        touch "$LOG_DIR/all_done"
+        echo -e "${GREEN}>>> ALL TESTS COMPLETED <<<${NC}"
+    else
+        rm -f "$LOG_DIR/all_done" 2>/dev/null
+        echo -e "${YELLOW}>>> Some tests are still pending <<<${NC}"
+    fi
+    echo "=============================="
+}
+
+# ==== TEST FUNCTIONS ====
+run_hdmi_test() {
+    echo -e "$(timestamp) ${YELLOW}[HDMI TEST] Starting...${NC}"
+    DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:2,0 "$VIDEO_URL"
+    read -rp "$(timestamp) HDMI test done? (Y/N): " ans
+    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.hdmi_done"; echo "$(timestamp) HDMI DONE" >> "$LOG_DIR/test_log.txt"; }
+}
+
+run_audiojack_test() {
+    echo -e "$(timestamp) ${YELLOW}[Audio Jack TEST] Starting...${NC}"
+    DISPLAY=:0 mpv --fs --length=30 --audio-device=alsa/hw:1,0 "$VIDEO_URL"
+    read -rp "$(timestamp) Audio Jack test done? (Y/N): " ans
+    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.audiojack_done"; echo "$(timestamp) Audio Jack DONE" >> "$LOG_DIR/test_log.txt"; }
+}
+
+run_relay_test() {
+    echo -e "$(timestamp) ${YELLOW}[Relay TEST] Starting...${NC}"
+    for pin in 208 210 211 209; do
+        echo $pin > /sys/class/gpio/export 2>/dev/null
+        echo out > /sys/class/gpio/gpio$pin/direction
+    done
+
+    success=1
+    echo 1 > /sys/class/gpio/gpio209/value
+    read -rp "$(timestamp) Did Relay 1 turn ON? (Y/N): " ans
+    [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
+    echo 0 > /sys/class/gpio/gpio209/value
+    echo 1 > /sys/class/gpio/gpio211/value; sleep 1; echo 0 > /sys/class/gpio/gpio211/value
+    read -rp "$(timestamp) Did Relay 1 turn OFF? (Y/N): " ans
+    [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
+    echo 1 > /sys/class/gpio/gpio210/value
+    read -rp "$(timestamp) Did Relay 2 turn ON? (Y/N): " ans
+    [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
+    echo 0 > /sys/class/gpio/gpio210/value
+    echo 1 > /sys/class/gpio/gpio208/value; sleep 1; echo 0 > /sys/class/gpio/gpio208/value
+    read -rp "$(timestamp) Did Relay 2 turn OFF? (Y/N): " ans
+    [[ ! "$ans" =~ ^[Yy]$ ]] && success=0
+
+    if [[ $success -eq 1 ]]; then
+        touch "$LOG_DIR/.relay_done"
+        echo -e "$(timestamp) ${GREEN}Relay test DONE${NC}"
+    else
+        echo -e "$(timestamp) ${RED}Relay test FAIL${NC}"
+    fi
+}
+
+run_led_test() {
+    echo -e "$(timestamp) ${YELLOW}[LED TEST] Starting...${NC}"
+    declare -A LEDS=(
+        [259]="LED-LAN"
+        [260]="LED-WIFI"
+        [261]="LED-SER"
+        [262]="LED-ERR"
+        [205]="LED-RUN"
+    )
+    for gpio in "${!LEDS[@]}"; do
+        echo $gpio > /sys/class/gpio/export 2>/dev/null
+        echo out > /sys/class/gpio/gpio$gpio/direction
+    done
+    for i in {1..5}; do
+        for gpio in "${!LEDS[@]}"; do echo 1 > /sys/class/gpio/gpio$gpio/value; done
+        sleep 0.5
+        for gpio in "${!LEDS[@]}"; do echo 0 > /sys/class/gpio/gpio$gpio/value; done
+        sleep 0.5
+    done
+    read -rp "$(timestamp) Were all LEDs blinking correctly? (Y/N): " ans
+    [[ $ans =~ ^[Yy]$ ]] && { touch "$LOG_DIR/.led_done"; echo "$(timestamp) LED DONE" >> "$LOG_DIR/test_log.txt"; }
+}
+
+push_to_google_sheet() {
+    check_flags
+    local container_name="miva"
+    local max_retries=3
+    local sleep_between=5
+    local attempt=1
+
+    if ! docker ps --filter "name=$container_name" --filter "status=running" --format "{{.Names}}" | grep -q "$container_name"; then
+        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Container $container_name chưa chạy, cannot push.${NC}"
+        return 1
+    fi
+
+    if [[ -f "$LOG_DIR/all_done" ]]; then
+        echo -e "$(timestamp) ${YELLOW}[GOOGLE SHEET] All tests done, pushing data...${NC}"
+    else
+        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Not all tests done!${NC}"
+        read -p "Do you want to continue push anyway? (y/N): " answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            echo -e "$(timestamp) ${RED}[GOOGLE SHEET] Push canceled by user.${NC}"
+            return 1
+        fi
+        echo -e "$(timestamp) ${YELLOW}[GOOGLE SHEET] Forcing push data...${NC}"
+    fi
+
+    local cmd=(docker exec -i -u0 "$container_name" mgwp_info -u miva)
+    until "${cmd[@]}" 2>&1 | while IFS= read -r line; do echo "$(timestamp) $line"; done; do
+        if [ $attempt -ge $max_retries ]; then
+            echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data thất bại sau $max_retries lần thử${NC}"
+            return 1
+        fi
+        echo -e "$(timestamp) ${RED}[GOOGLE SHEET] push_data thất bại (attempt $attempt), retrying in $sleep_between sec...${NC}"
+        attempt=$((attempt+1))
+        sleep $sleep_between
+    done
+
+    echo -e "$(timestamp) ${GREEN}[GOOGLE SHEET] Data pushed successfully!${NC}"
+}
+
+run_auto_test() {
+    run_hdmi_test
+    run_audiojack_test
+    run_relay_test
+    run_led_test
+}
+
+# ==== MENU ====
+while true; do
+    check_flags
+    echo "Select a test option:"
+    echo "1) Auto"
+    echo "2) HDMI"
+    echo "3) Audio Jack"
+    echo "4) Relay"
+    echo "5) LED"
+    echo "6) Push data to Google Sheet"
+    echo "0) Exit"
+    read -rp "Enter choice [0-6]: " choice
+    case $choice in
+        1) run_auto_test ;;
+        2) run_hdmi_test ;;
+        3) run_audiojack_test ;;
+        4) run_relay_test ;;
+        5) run_led_test ;;
+        6) push_to_google_sheet ;;
+        0) exit 0 ;;
+        *) echo "Invalid choice!" ;;
+    esac
+done
