@@ -11,4 +11,6 @@ hw_test
 ```
 ## 🚀 MIVA, patch HDMI hot plug
 Chạy lệnh sau trong terminal:
-```bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_hdmi_hotplug_patch.sh)```
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_hdmi_hotplug_patch.sh)
+```
