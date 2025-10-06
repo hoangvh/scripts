@@ -7,8 +7,8 @@
 Chạy lệnh sau trong terminal:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_hw_test -o /usr/local/bin/hw_test && chmod +x /usr/local/bin/hw_test
-hw_test```
-
+hw_test
+```
 ## 🚀 MIVA, patch HDMI hot plug
 Chạy lệnh sau trong terminal:
 ```bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/miva_hdmi_hotplug_patch.sh)```
