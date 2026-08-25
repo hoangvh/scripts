@@ -2,310 +2,800 @@
 set -Eeuo pipefail
 
 # ============================================================================
-# install-miva.sh — one-line MIVA application installer
+# MIVA application installer
 #
-# Chạy trực tiếp trên firmware MIVA DSDZ-H618 (đã boot production):
+# Architecture:
+#   Phase 1: Host preparation
+#     - Display / Xorg / Openbox
+#     - MPV / FFmpeg
+#     - HDMI hotplug
 #
-#   sudo -i
-#   bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh)
+#   Phase 2: MIVA upstream
+#     - Clone/update smatecvn/miva
+#     - 4G initialization
+#     - netcfg-watcher
+#     - MPV integration
+#     - MIVA network configuration
+#     - Docker Compose
 #
-# Chọn Docker image tag:
+# Manual:
 #
-#   TAG=<tag> bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh)
+#   MIVA_TAG=latest bash <(
+#       curl -4 -fsSL \
+#       https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh
+#   )
 #
-# Default: TAG=latest
-#
-# Script tự clone/update upstream https://github.com/smatecvn/miva (branch
-# master) vào /home/miva rồi chạy flow tương đương setup/setup_miva.sh.
-# KHÔNG yêu cầu clone repo thủ công trước.
-#
-# Yêu cầu:
-#   - chạy bằng root
-#   - base firmware phải có Docker (docker + docker compose)
-#   - không phụ thuộc current working directory
-#
-# LƯU Ý NETWORK OWNERSHIP:
-#   - TRƯỚC install: network do firmware bootstrap quản lý
-#     (/etc/netplan/20-miva-device.yaml từ init.conf).
-#   - SAU install:  network do upstream MIVA quản lý
-#     (/etc/netplan/01-netcfg.yaml, 02-rndis.yaml, 03-uqmi.yaml).
-#   Script xóa /etc/netplan/*.yaml và copy các YAML upstream (giống
-#   setup_miva.sh: rm /etc/netplan/*.yaml; chmod 600; cp *.yaml /etc/netplan).
-#   20-miva-device.yaml KHÔNG được tồn tại sau khi cài.
-#
-# Option:
-#   TAG          image tag cho sonnh911/miva (default: latest)
-#   INSTALL_MPV  yes/no  cài mpv + x11-xserver-utils + cron mpv_init
-#                (default: yes)
 # ============================================================================
 
-UPSTREAM_URL="https://github.com/smatecvn/miva.git"
-UPSTREAM_BRANCH="master"
-APP_DIR="/home/miva"
-COMPOSE_DIR="/home/miva/docker"
-MGPW_DIR="/root/mgwp"
-USB_MM_RULE="/etc/udev/rules.d/99-mm-ignore.rules"
-GPIO_4G=204 # upstream 4G reset GPIO (KHÁC LED_GPIO=262 của installer)
+# ----------------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------------
 
-TAG="${TAG:-latest}"
-INSTALL_MPV="${INSTALL_MPV:-yes}"
+FEATURE_DISPLAY="${FEATURE_DISPLAY:-yes}"
+FEATURE_MPV="${FEATURE_MPV:-yes}"
+FEATURE_HDMI_HOTPLUG="${FEATURE_HDMI_HOTPLUG:-yes}"
 
-# Temporary directory dùng để stage git clone; tự dọn khi thoát.
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+MIVA_INSTALL="${MIVA_INSTALL:-yes}"
+MIVA_TAG="${MIVA_TAG:-${TAG:-latest}}"
+MIVA_BRANCH="${MIVA_BRANCH:-master}"
+MIVA_NETWORK="${MIVA_NETWORK:-yes}"
 
-log()  { echo "[miva-install] $*"; }
-warn() { echo "[miva-install][WARN] $*" >&2; }
-die()  { echo "[miva-install][ERROR] $*" >&2; exit 1; }
+MIVA_REPO="https://github.com/smatecvn/miva.git"
+MIVA_DIR="/home/miva"
 
-if [[ "$(id -u)" -ne 0 ]]; then
-    die "must run as root (try: sudo -i, sau do chay lai lenh nay)"
+STATE_DIR="/var/lib/miva-firstboot"
+
+APT_UPDATED=no
+
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+
+log() {
+    echo "[miva-install] $*"
+}
+
+warn() {
+    echo "[miva-install] WARNING: $*" >&2
+}
+
+die() {
+    echo "[miva-install] ERROR: $*" >&2
+    exit 1
+}
+
+
+# ----------------------------------------------------------------------------
+# Error handler
+# ----------------------------------------------------------------------------
+
+on_error() {
+    local rc=$?
+    local line="${BASH_LINENO[0]:-unknown}"
+
+    echo "[miva-install] ERROR at line ${line}, exit=${rc}" >&2
+    exit "$rc"
+}
+
+trap on_error ERR
+
+
+# ----------------------------------------------------------------------------
+# Root
+# ----------------------------------------------------------------------------
+
+[[ "$(id -u)" -eq 0 ]] || die "This installer must run as root"
+
+
+# ----------------------------------------------------------------------------
+# Boolean validation
+# ----------------------------------------------------------------------------
+
+validate_bool() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        yes|no)
+            ;;
+        *)
+            die "${name} must be 'yes' or 'no', got '${value}'"
+            ;;
+    esac
+}
+
+validate_bool FEATURE_DISPLAY "$FEATURE_DISPLAY"
+validate_bool FEATURE_MPV "$FEATURE_MPV"
+validate_bool FEATURE_HDMI_HOTPLUG "$FEATURE_HDMI_HOTPLUG"
+validate_bool MIVA_INSTALL "$MIVA_INSTALL"
+validate_bool MIVA_NETWORK "$MIVA_NETWORK"
+
+
+# ----------------------------------------------------------------------------
+# Feature dependency resolution
+# ----------------------------------------------------------------------------
+
+if [[ "$FEATURE_MPV" == "yes" && "$FEATURE_DISPLAY" != "yes" ]]; then
+    log "FEATURE_MPV requires DISPLAY; enabling FEATURE_DISPLAY"
+    FEATURE_DISPLAY=yes
 fi
 
-# ---------------------------------------------------------------------------
-# 1. Docker phải có sẵn trong base firmware (KHÔNG tự cài lại Docker)
-# ---------------------------------------------------------------------------
-if ! command -v docker >/dev/null 2>&1; then
-    die "Base firmware does not contain Docker"
+if [[ "$FEATURE_HDMI_HOTPLUG" == "yes" && "$FEATURE_DISPLAY" != "yes" ]]; then
+    log "FEATURE_HDMI_HOTPLUG requires DISPLAY; enabling FEATURE_DISPLAY"
+    FEATURE_DISPLAY=yes
 fi
-docker --version >/dev/null 2>&1 || die "docker is not functional"
 
-if docker compose version >/dev/null 2>&1; then
-    COMPOSE=(docker compose)
-elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE=(docker-compose)
-else
-    die "Docker Compose not found; base firmware must provide 'docker compose' or 'docker-compose'"
-fi
-log "Using compose: ${COMPOSE[*]}"
 
-# ---------------------------------------------------------------------------
-# 2. Host dependencies
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# State
+# ----------------------------------------------------------------------------
+
+mkdir -p "$STATE_DIR"
+
+
+mark_done() {
+    touch "${STATE_DIR}/$1.done"
+}
+
+
+is_done() {
+    [[ -f "${STATE_DIR}/$1.done" ]]
+}
+
+
+# ============================================================================
+# APT
+# ============================================================================
+
+configure_apt_network() {
+
+    log "Configuring APT to use IPv4"
+
+    mkdir -p /etc/apt/apt.conf.d
+
+    cat >/etc/apt/apt.conf.d/99miva-force-ipv4 <<'EOF'
+Acquire::ForceIPv4 "true";
+EOF
+}
+
+
+apt_update_once() {
+
+    if [[ "$APT_UPDATED" == "yes" ]]; then
+        return 0
+    fi
+
+    log "Updating APT package lists"
+
+    apt-get update
+
+    APT_UPDATED=yes
+}
+
+
 install_pkgs() {
-    local missing=() p
-    for p in "$@"; do
-        dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+
+    local missing=()
+    local pkg
+
+    for pkg in "$@"; do
+
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null \
+            | grep -q "install ok installed"; then
+
+            missing+=("$pkg")
+        fi
     done
-    [[ ${#missing[@]} -eq 0 ]] && return 0
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        return 0
+    fi
+
     log "Installing packages: ${missing[*]}"
-    apt-get update -y
-    apt-get install -y --no-install-recommends "${missing[@]}"
+
+    apt_update_once
+
+    DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y --no-install-recommends "${missing[@]}"
 }
 
-install_pkgs git curl ca-certificates inotify-tools cron
 
-if [[ "$INSTALL_MPV" == "yes" ]]; then
-    log "INSTALL_MPV=yes: installing mpv + x11-xserver-utils"
-    install_pkgs mpv x11-xserver-utils
-else
-    log "INSTALL_MPV=no: skipping mpv / x11-xserver-utils / mpv_init cron"
-fi
+configure_apt_network
 
-# ---------------------------------------------------------------------------
-# 3. Runtime directories (idempotent, runtime data preserved)
-# ---------------------------------------------------------------------------
-log "Creating runtime directories under ${MGPW_DIR}"
-mkdir -p "$MGPW_DIR/network" "$MGPW_DIR/upgrade" "$MGPW_DIR/reboot"
-touch "$MGPW_DIR/network/netplan.apply"
-touch "$MGPW_DIR/upgrade/upgrade.tag"
-touch "$MGPW_DIR/reboot/reboot.apply"
 
-mkdir -p /mnt/mmcblk0p1
+# ============================================================================
+# PHASE 1
+# ============================================================================
 
-# ---------------------------------------------------------------------------
-# 4. Clone / update upstream MIVA app to /home/miva (self-contained)
-# ---------------------------------------------------------------------------
-if [[ -d "$APP_DIR/.git" ]]; then
-    log "Updating existing MIVA repo at $APP_DIR"
-    git -C "$APP_DIR" fetch origin
-    git -C "$APP_DIR" checkout master
-    git -C "$APP_DIR" reset --hard "origin/$UPSTREAM_BRANCH"
-else
-    if [[ -e "$APP_DIR" ]] && [[ -n "$(ls -A "$APP_DIR" 2>/dev/null || true)" ]]; then
-        die "$APP_DIR exists but is not a git repo; refusing to overwrite"
-    fi
-    log "Cloning MIVA repo from $UPSTREAM_URL (staged in $WORK_DIR)"
-    git clone --branch "$UPSTREAM_BRANCH" "$UPSTREAM_URL" "$WORK_DIR/miva" || die "clone upstream failed"
-    rm -rf "$APP_DIR"
-    mv "$WORK_DIR/miva" "$APP_DIR"
-fi
+log "========================================"
+log "PHASE 1: HOST PREPARATION"
+log "========================================"
 
-# ---------------------------------------------------------------------------
-# 5. Helper scripts -> /usr/local/bin (theo setup_miva.sh)
-# ---------------------------------------------------------------------------
-log "Installing helper scripts to /usr/local/bin"
-cp -v "$APP_DIR/setup/init_4g_module.sh"    /usr/local/bin/init_4g_module.sh
-cp -v "$APP_DIR/setup/netcfg-watcher.sh"    /usr/local/bin/netcfg-watcher.sh
-cp -v "$APP_DIR/setup/mpv_init.sh"          /usr/local/bin/mpv_init.sh
-chmod 0755 /usr/local/bin/init_4g_module.sh \
-           /usr/local/bin/netcfg-watcher.sh \
-           /usr/local/bin/mpv_init.sh
 
-# ---------------------------------------------------------------------------
-# 6. systemd services (theo setup_miva.sh)
-# ---------------------------------------------------------------------------
-log "Installing systemd services"
-cp -v "$APP_DIR/setup/netcfg-watcher.service" /etc/systemd/system/netcfg-watcher.service
-cp -v "$APP_DIR/setup/pre-docker-gpio.service" /etc/systemd/system/pre-docker-gpio.service
-systemctl daemon-reload
-systemctl enable netcfg-watcher.service
-systemctl enable pre-docker-gpio.service
+# ----------------------------------------------------------------------------
+# Common dependencies
+# ----------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 7. ModemManager ignore rule cho /dev/ttyUSB1 (theo setup_miva.sh)
-# ---------------------------------------------------------------------------
-log "Installing udev rule ${USB_MM_RULE}"
-printf 'KERNEL=="ttyUSB1", ENV{ID_MM_DEVICE_IGNORE}="1"\n' > "$USB_MM_RULE"
-udevadm control --reload-rules
-udevadm trigger
+install_common() {
 
-# ---------------------------------------------------------------------------
-# 8. MPV cron (idempotent). mpv_init.sh cần X display trên :0.
-# ---------------------------------------------------------------------------
-if [[ "$INSTALL_MPV" == "yes" ]]; then
-    CRON_LINE='*/1 * * * * /usr/local/bin/mpv_init.sh >> /tmp/mpv_init.log 2>&1'
-    if ! crontab -l 2>/dev/null | grep -Fq "$CRON_LINE"; then
-        log "Adding mpv_init cron entry"
-        ( crontab -l 2>/dev/null || true; echo "$CRON_LINE" ) | crontab - || die "failed to install cron entry"
-    else
-        log "mpv_init cron entry already present"
+    if is_done common; then
+        log "Common dependencies already installed"
+        return
     fi
 
-    if ! DISPLAY=:0 xrandr >/dev/null 2>&1; then
-        warn "no X display on :0; mpv video zones will start once Xorg is running"
-    fi
-fi
+    install_pkgs \
+        git \
+        curl \
+        ca-certificates \
+        inotify-tools \
+        cron
 
-# ---------------------------------------------------------------------------
-# 9. NETWORK TAKEOVER — theo setup_miva.sh: rm + copy YAML upstream.
-#    20-miva-device.yaml (firmware bootstrap) phải bị xóa.
-# ---------------------------------------------------------------------------
-log "Taking over production network config (upstream MIVA netplan)"
-rm -f /etc/netplan/*.yaml
-
-cp "$APP_DIR/setup/01-netcfg.yaml" /etc/netplan/01-netcfg.yaml
-cp "$APP_DIR/setup/02-rndis.yaml"  /etc/netplan/02-rndis.yaml
-cp "$APP_DIR/setup/03-uqmi.yaml"   /etc/netplan/03-uqmi.yaml
-
-chmod 600 /etc/netplan/*.yaml
-
-log "Generating netplan"
-netplan generate || die "netplan generate failed"
-
-log "Applying netplan"
-netplan apply || die "netplan apply failed"
-
-if [[ -f /etc/netplan/20-miva-device.yaml ]]; then
-    die "20-miva-device.yaml still exists after network takeover"
-fi
-
-# ---------------------------------------------------------------------------
-# 10. 4G GPIO (upstream uses GPIO 204, khác LED_GPIO=262 của installer).
-#     Hardware optional: failure KHÔNG được làm install abort.
-# ---------------------------------------------------------------------------
-check_gpio() {
-    if [[ ! -e /sys/class/gpio/export ]]; then
-        warn "legacy sysfs GPIO not available (/sys/class/gpio/export missing); 4G modem reset via GPIO ${GPIO_4G} may not work"
-        return 1
-    fi
-    if [[ ! -w /sys/class/gpio/export ]]; then
-        warn "sysfs GPIO export not writable; 4G modem reset via GPIO ${GPIO_4G} may not work"
-        return 1
-    fi
-    return 0
+    mark_done common
 }
 
-# ---------------------------------------------------------------------------
-# 11. Start services (theo setup_miva.sh: systemctl start)
-# ---------------------------------------------------------------------------
-log "Starting netcfg-watcher.service"
-systemctl restart netcfg-watcher.service \
-    || warn "netcfg-watcher failed to start; check: systemctl status netcfg-watcher.service"
 
-if check_gpio; then
-    log "Starting pre-docker-gpio.service (4G reset via GPIO ${GPIO_4G})"
-    systemctl restart pre-docker-gpio.service \
-        || warn "pre-docker-gpio failed to start (4G modem may be absent); check: systemctl status pre-docker-gpio.service"
-else
-    warn "skipping pre-docker-gpio start (sysfs GPIO not available); will be retried at next boot"
-fi
+install_common
 
-# ---------------------------------------------------------------------------
-# 12. Docker compose: dynamic devices + validation + pull + up
-# ---------------------------------------------------------------------------
-log "Generating device overrides (docker-compose.override.yml)"
-cd "$COMPOSE_DIR"
-chmod +x generate-devices.sh
-./generate-devices.sh || die "generate-devices.sh failed"
 
-log "Validating compose config"
-"${COMPOSE[@]}" config >/dev/null || die "docker compose config validation failed"
+# ----------------------------------------------------------------------------
+# Display
+# ----------------------------------------------------------------------------
 
-export TAG
-log "Pulling image sonnh911/miva:${TAG}"
-"${COMPOSE[@]}" pull || die "docker compose pull failed"
+install_display() {
 
-log "Starting MIVA container"
-"${COMPOSE[@]}" up -d || die "docker compose up failed"
-
-# ---------------------------------------------------------------------------
-# 13. Verification
-# ---------------------------------------------------------------------------
-log "=== Verification ==="
-echo "--- /etc/netplan/ ---"
-ls -la /etc/netplan/
-echo "--- grep /etc/netplan/ ---"
-grep -R . /etc/netplan/ || true
-
-if [[ -f /etc/netplan/20-miva-device.yaml ]]; then
-    die "FAIL: 20-miva-device.yaml must not exist after install"
-fi
-log "OK: 20-miva-device.yaml removed"
-
-netplan generate || die "netplan generate (verify) failed"
-
-log "--- ip -4 addr ---"
-ip -4 addr || true
-log "--- ip route ---"
-ip route || true
-
-cd "$COMPOSE_DIR"
-"${COMPOSE[@]}" config >/dev/null || die "docker compose config (verify) failed"
-"${COMPOSE[@]}" ps || die "docker compose ps failed"
-
-if docker ps --filter "name=^/miva$" --format '{{.Names}} {{.Status}}' | grep -q .; then
-    log "container 'miva' is running"
-else
-    if docker ps -a --filter "name=^/miva$" --format '{{.Names}}' | grep -q .; then
-        warn "container 'miva' exists but is NOT running; check: docker logs miva"
-    else
-        die "container 'miva' was not created; check: docker compose ps"
+    if [[ "$FEATURE_DISPLAY" != "yes" ]]; then
+        log "FEATURE_DISPLAY=no; skipping display stack"
+        return
     fi
+
+    if is_done display; then
+        log "Display stack already installed"
+        return
+    fi
+
+    log "Installing Xorg/Openbox display stack"
+
+    install_pkgs \
+        xserver-xorg \
+        xinit \
+        openbox \
+        mesa-utils \
+        wmctrl \
+        x11-utils \
+        x11-xserver-utils \
+        fonts-cantarell
+
+    # ------------------------------------------------------------------------
+    # Openbox configuration
+    # ------------------------------------------------------------------------
+
+    mkdir -p /root/.config/openbox
+
+    if [[ ! -f /root/.config/openbox/autostart ]]; then
+        cat >/root/.config/openbox/autostart <<'EOF'
+# MIVA Openbox autostart
+
+xset -dpms
+xset s off
+xset s noblank
+EOF
+    fi
+
+    chmod +x /root/.config/openbox/autostart
+
+
+    # ------------------------------------------------------------------------
+    # Xorg/Openbox launcher
+    # ------------------------------------------------------------------------
+
+    cat >/usr/local/sbin/miva-xorg-openbox <<'EOF'
+#!/usr/bin/env bash
+set -e
+
+export DISPLAY=:0
+export XAUTHORITY=/root/.Xauthority
+
+exec startx /usr/bin/openbox-session -- :0 \
+    -nocursor \
+    -s 0 \
+    -dpms
+EOF
+
+    chmod 0755 /usr/local/sbin/miva-xorg-openbox
+
+
+    # ------------------------------------------------------------------------
+    # systemd
+    # ------------------------------------------------------------------------
+
+    cat >/etc/systemd/system/xorg-openbox.service <<'EOF'
+[Unit]
+Description=MIVA Xorg + Openbox
+After=systemd-user-sessions.service
+Wants=systemd-user-sessions.service
+
+[Service]
+Type=simple
+
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/root/.Xauthority
+
+ExecStart=/usr/local/sbin/miva-xorg-openbox
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable xorg-openbox.service
+
+    mark_done display
+
+    log "Display stack installed"
+}
+
+
+install_display
+
+
+# ----------------------------------------------------------------------------
+# MPV
+# ----------------------------------------------------------------------------
+
+install_mpv() {
+
+    if [[ "$FEATURE_MPV" != "yes" ]]; then
+        log "FEATURE_MPV=no; skipping MPV"
+        return
+    fi
+
+    if is_done mpv; then
+        log "MPV already installed"
+        return
+    fi
+
+    log "Installing MPV/FFmpeg"
+
+    install_pkgs \
+        mpv \
+        ffmpeg
+
+    mark_done mpv
+}
+
+
+install_mpv
+
+
+# ----------------------------------------------------------------------------
+# HDMI hotplug
+# ----------------------------------------------------------------------------
+
+install_hdmi_hotplug() {
+
+    if [[ "$FEATURE_HDMI_HOTPLUG" != "yes" ]]; then
+        log "FEATURE_HDMI_HOTPLUG=no; skipping HDMI hotplug"
+        return
+    fi
+
+    if is_done hdmi; then
+        log "HDMI hotplug already installed"
+        return
+    fi
+
+    log "Installing HDMI hotplug support"
+
+    # ------------------------------------------------------------------------
+    # HDMI handler
+    # ------------------------------------------------------------------------
+
+    cat >/usr/local/sbin/miva-hdmi-hotplug <<'EOF'
+#!/usr/bin/env bash
+
+export DISPLAY=:0
+export XAUTHORITY=/root/.Xauthority
+
+sleep 1
+
+if command -v xrandr >/dev/null 2>&1; then
+    xrandr --auto || true
+fi
+EOF
+
+    chmod 0755 /usr/local/sbin/miva-hdmi-hotplug
+
+
+    # ------------------------------------------------------------------------
+    # systemd service
+    # ------------------------------------------------------------------------
+
+    cat >/etc/systemd/system/miva-hdmi-hotplug.service <<'EOF'
+[Unit]
+Description=MIVA HDMI hotplug handler
+After=xorg-openbox.service
+
+[Service]
+Type=oneshot
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/root/.Xauthority
+ExecStart=/usr/local/sbin/miva-hdmi-hotplug
+EOF
+
+
+    # ------------------------------------------------------------------------
+    # udev
+    #
+    # Do not assume a board-specific DRM event here.
+    # Existing board-specific HDMI rules can be installed separately.
+    # ------------------------------------------------------------------------
+
+    systemctl daemon-reload
+
+    mark_done hdmi
+
+    log "HDMI hotplug support installed"
+}
+
+
+install_hdmi_hotplug
+
+
+log "========================================"
+log "PHASE 1: HOST PREPARATION COMPLETE"
+log "========================================"
+
+
+# ============================================================================
+# Stop here when MIVA application is disabled
+# ============================================================================
+
+if [[ "$MIVA_INSTALL" != "yes" ]]; then
+
+    log "MIVA_INSTALL=no"
+    log "Host preparation complete; skipping MIVA application"
+
+    exit 0
 fi
 
-if docker inspect miva >/dev/null 2>&1; then
-    log "docker inspect miva: OK"
-else
-    warn "docker inspect miva failed"
-fi
 
-echo
-systemctl --no-pager status netcfg-watcher.service || true
-systemctl --no-pager status pre-docker-gpio.service || true
+# ============================================================================
+# PHASE 2
+# ============================================================================
 
-# ---------------------------------------------------------------------------
-# 14. Done
-# ---------------------------------------------------------------------------
-DEVICE_IP="$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{gsub(/\/.*/,"",$2); print $2; exit}')"
+log "========================================"
+log "PHASE 2: MIVA UPSTREAM INSTALL"
+log "========================================"
 
-echo
-log "MIVA installation completed"
-if [[ -n "$DEVICE_IP" ]]; then
-    log "Web:    http://${DEVICE_IP}   (port 80)"
-    log "        https://${DEVICE_IP}  (port 443)"
-else
-    log "Web:    http://<device-ip>    (port 80 / 443)"
-fi
-log "Status: cd /home/miva/docker && docker compose ps"
-log "Logs:   docker logs -f miva"
+
+# ----------------------------------------------------------------------------
+# Clone/update upstream
+# ----------------------------------------------------------------------------
+
+install_miva_source() {
+
+    log "Preparing MIVA source"
+
+    if [[ -d "$MIVA_DIR/.git" ]]; then
+
+        log "Updating existing MIVA repository"
+
+        git -C "$MIVA_DIR" fetch origin "$MIVA_BRANCH"
+
+        git -C "$MIVA_DIR" checkout -B \
+            "$MIVA_BRANCH" \
+            "origin/$MIVA_BRANCH"
+
+    else
+
+        if [[ -e "$MIVA_DIR" ]]; then
+            die "$MIVA_DIR exists but is not a Git repository"
+        fi
+
+        git clone \
+            --branch "$MIVA_BRANCH" \
+            --single-branch \
+            "$MIVA_REPO" \
+            "$MIVA_DIR"
+    fi
+
+    mark_done miva-source
+}
+
+
+install_miva_source
+
+
+# ----------------------------------------------------------------------------
+# MIVA core
+# ----------------------------------------------------------------------------
+
+install_miva_core() {
+
+    log "Installing MIVA core host services"
+
+    local setup="$MIVA_DIR/setup"
+
+    [[ -d "$setup" ]] || die "Missing upstream setup directory"
+
+
+    # ------------------------------------------------------------------------
+    # 4G modem initialization
+    # ------------------------------------------------------------------------
+
+    if [[ -f "$setup/init_4g_module.sh" ]]; then
+
+        install -m 0755 \
+            "$setup/init_4g_module.sh" \
+            /usr/local/bin/init_4g_module.sh
+    fi
+
+
+    # ------------------------------------------------------------------------
+    # pre-docker GPIO
+    # ------------------------------------------------------------------------
+
+    if [[ -f "$setup/pre-docker-gpio.service" ]]; then
+
+        install -m 0644 \
+            "$setup/pre-docker-gpio.service" \
+            /etc/systemd/system/pre-docker-gpio.service
+
+        systemctl enable pre-docker-gpio.service
+    fi
+
+
+    # ------------------------------------------------------------------------
+    # netcfg watcher
+    # ------------------------------------------------------------------------
+
+    if [[ -f "$setup/netcfg-watcher.sh" ]]; then
+
+        install -m 0755 \
+            "$setup/netcfg-watcher.sh" \
+            /usr/local/bin/netcfg-watcher.sh
+    fi
+
+
+    if [[ -f "$setup/netcfg-watcher.service" ]]; then
+
+        install -m 0644 \
+            "$setup/netcfg-watcher.service" \
+            /etc/systemd/system/netcfg-watcher.service
+
+        systemctl enable netcfg-watcher.service
+    fi
+
+
+    # ------------------------------------------------------------------------
+    # Runtime directories expected by MIVA
+    # ------------------------------------------------------------------------
+
+    mkdir -p \
+        /root/mgwp/network \
+        /root/mgwp/upgrade \
+        /root/mgwp/reboot
+
+
+    touch \
+        /root/mgwp/network/netplan.apply \
+        /root/mgwp/upgrade/upgrade.tag \
+        /root/mgwp/reboot/reboot.apply
+
+
+    # ------------------------------------------------------------------------
+    # MPV integration
+    # ------------------------------------------------------------------------
+
+    if [[ "$FEATURE_MPV" == "yes" && -f "$setup/mpv_init.sh" ]]; then
+
+        install -m 0755 \
+            "$setup/mpv_init.sh" \
+            /usr/local/bin/mpv_init.sh
+
+        CRON_LINE='* * * * * /usr/local/bin/mpv_init.sh >/dev/null 2>&1'
+
+        (
+            crontab -l 2>/dev/null \
+                | grep -Fv '/usr/local/bin/mpv_init.sh' || true
+
+            echo "$CRON_LINE"
+
+        ) | crontab -
+    fi
+
+
+    systemctl daemon-reload
+
+    mark_done miva-core
+}
+
+
+install_miva_core
+
+
+# ============================================================================
+# Network configuration
+# ============================================================================
+
+install_miva_network() {
+
+    if [[ "$MIVA_NETWORK" != "yes" ]]; then
+
+        log "MIVA_NETWORK=no"
+        log "Keeping firmware/bootstrap network configuration"
+
+        return
+    fi
+
+    log "Staging MIVA upstream network configuration"
+
+    local setup="$MIVA_DIR/setup"
+
+    for file in \
+        01-netcfg.yaml \
+        02-rndis.yaml \
+        03-uqmi.yaml
+    do
+        [[ -f "$setup/$file" ]] \
+            || die "Missing upstream network file: $file"
+    done
+
+
+    # MIVA now becomes owner of Netplan configuration.
+    rm -f /etc/netplan/*.yaml
+
+
+    install -m 0600 \
+        "$setup/01-netcfg.yaml" \
+        /etc/netplan/01-netcfg.yaml
+
+    install -m 0600 \
+        "$setup/02-rndis.yaml" \
+        /etc/netplan/02-rndis.yaml
+
+    install -m 0600 \
+        "$setup/03-uqmi.yaml" \
+        /etc/netplan/03-uqmi.yaml
+
+
+    # Generate only.
+    #
+    # IMPORTANT:
+    # Do NOT netplan apply here because doing so can remove the Internet
+    # connection being used to pull the MIVA Docker image.
+    netplan generate
+
+    mark_done miva-network
+
+    log "MIVA network configuration staged"
+}
+
+
+install_miva_network
+
+
+# ============================================================================
+# Docker
+# ============================================================================
+
+install_miva_docker() {
+
+    local docker_dir="$MIVA_DIR/docker"
+
+    [[ -d "$docker_dir" ]] \
+        || die "Missing MIVA docker directory"
+
+
+    cd "$docker_dir"
+
+
+    # ------------------------------------------------------------------------
+    # Generate dynamic device mappings
+    # ------------------------------------------------------------------------
+
+    if [[ -f ./generate-devices.sh ]]; then
+
+        chmod +x ./generate-devices.sh
+
+        log "Generating Docker device mappings"
+
+        ./generate-devices.sh
+    fi
+
+
+    # ------------------------------------------------------------------------
+    # Compose
+    # ------------------------------------------------------------------------
+
+    if docker compose version >/dev/null 2>&1; then
+
+        COMPOSE=(docker compose)
+
+    elif command -v docker-compose >/dev/null 2>&1; then
+
+        COMPOSE=(docker-compose)
+
+    else
+
+        die "Docker Compose not found"
+    fi
+
+
+    export TAG="$MIVA_TAG"
+
+    log "Using Docker image tag: $TAG"
+
+
+    log "Validating Docker Compose configuration"
+
+    "${COMPOSE[@]}" config >/dev/null
+
+
+    log "Pulling MIVA Docker image"
+
+    "${COMPOSE[@]}" pull
+
+
+    log "Starting MIVA"
+
+    "${COMPOSE[@]}" up -d
+
+
+    # ------------------------------------------------------------------------
+    # Verify
+    # ------------------------------------------------------------------------
+
+    log "Verifying MIVA container"
+
+    local ok=no
+
+    for _ in $(seq 1 10); do
+
+        if docker ps --format '{{.Names}}' \
+            | grep -qx 'miva'; then
+
+            ok=yes
+            break
+        fi
+
+        sleep 2
+    done
+
+
+    "${COMPOSE[@]}" ps || true
+
+
+    if [[ "$ok" != "yes" ]]; then
+
+        docker ps -a || true
+
+        die "MIVA container is not running"
+    fi
+
+
+    mark_done miva-container
+}
+
+
+install_miva_docker
+
+
+# ============================================================================
+# Final verification
+# ============================================================================
+
+log "========================================"
+log "MIVA INSTALLATION COMPLETE"
+log "========================================"
+
+log "MIVA branch : $MIVA_BRANCH"
+log "MIVA tag    : $MIVA_TAG"
+log "Network     : $MIVA_NETWORK"
+
+docker ps --filter name=miva || true
+
+exit 0
