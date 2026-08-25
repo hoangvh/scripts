@@ -19,3 +19,14 @@ Chạy lệnh sau trong terminal:
 ```
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/mira-rk3328adb01)"
 ```
+## 🚀 MIVA H618, cài application MIVA (one-line installer)
+Chạy trên firmware MIVA DSDZ-H618 đã boot production:
+```
+sudo -i
+bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh)
+```
+Chọn Docker image tag:
+```
+TAG=<tag> bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh)
+```
+Default: `TAG=latest`. Script tự clone upstream `smatecvn/miva` vào `/home/miva`, cài service/udev/cron, chuyển network sang netplan upstream (`01/02/03-netcfg.yaml`), `generate-devices.sh`, `docker compose pull` + `up -d`, rồi verify container.
