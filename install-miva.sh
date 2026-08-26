@@ -1,801 +1,307 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ============================================================================
-# MIVA application installer
-#
-# Architecture:
-#   Phase 1: Host preparation
-#     - Display / Xorg / Openbox
-#     - MPV / FFmpeg
-#     - HDMI hotplug
-#
-#   Phase 2: MIVA upstream
-#     - Clone/update smatecvn/miva
-#     - 4G initialization
-#     - netcfg-watcher
-#     - MPV integration
-#     - MIVA network configuration
-#     - Docker Compose
-#
-# Manual:
-#
-#   MIVA_TAG=latest bash <(
-#       curl -4 -fsSL \
-#       https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh
-#   )
-#
-# ============================================================================
-
-# ----------------------------------------------------------------------------
-# Configuration
-# ----------------------------------------------------------------------------
-
-FEATURE_DISPLAY="${FEATURE_DISPLAY:-yes}"
-FEATURE_MPV="${FEATURE_MPV:-yes}"
-FEATURE_HDMI_HOTPLUG="${FEATURE_HDMI_HOTPLUG:-yes}"
+UPSTREAM_REPO="https://github.com/smatecvn/miva.git"
+MIVA_HOME="/home/miva"
+SETUP_DIR="$MIVA_HOME/setup"
+DOCKER_DIR="$MIVA_HOME/docker"
+STATE_DIR="/var/lib/miva-firstboot"
 
 MIVA_INSTALL="${MIVA_INSTALL:-yes}"
 MIVA_TAG="${MIVA_TAG:-${TAG:-latest}}"
 MIVA_BRANCH="${MIVA_BRANCH:-master}"
+FEATURE_DISPLAY="${FEATURE_DISPLAY:-yes}"
+FEATURE_MPV="${FEATURE_MPV:-yes}"
+FEATURE_HDMI_HOTPLUG="${FEATURE_HDMI_HOTPLUG:-yes}"
 MIVA_NETWORK="${MIVA_NETWORK:-yes}"
 
-MIVA_REPO="https://github.com/smatecvn/miva.git"
-MIVA_DIR="/home/miva"
+log()  { printf '[miva-app] %s\n' "$*"; }
+warn() { printf '[miva-app] WARNING: %s\n' "$*" >&2; }
+die()  { printf '[miva-app] ERROR: %s\n' "$*" >&2; exit 1; }
 
-STATE_DIR="/var/lib/miva-firstboot"
+done_stage() { [[ -f "$STATE_DIR/$1.done" ]]; }
+mark_stage() { mkdir -p "$STATE_DIR"; touch "$STATE_DIR/$1.done"; }
+yesno() { [[ "${1,,}" == "yes" ]]; }
 
-APT_UPDATED=no
-
-
-# ----------------------------------------------------------------------------
-# Logging
-# ----------------------------------------------------------------------------
-
-log() {
-    echo "[miva-install] $*"
+require_root() {
+    [[ $EUID -eq 0 ]] || die "Run as root"
 }
 
-warn() {
-    echo "[miva-install] WARNING: $*" >&2
-}
-
-die() {
-    echo "[miva-install] ERROR: $*" >&2
-    exit 1
-}
-
-
-# ----------------------------------------------------------------------------
-# Error handler
-# ----------------------------------------------------------------------------
-
-on_error() {
-    local rc=$?
-    local line="${BASH_LINENO[0]:-unknown}"
-
-    echo "[miva-install] ERROR at line ${line}, exit=${rc}" >&2
-    exit "$rc"
-}
-
-trap on_error ERR
-
-
-# ----------------------------------------------------------------------------
-# Root
-# ----------------------------------------------------------------------------
-
-[[ "$(id -u)" -eq 0 ]] || die "This installer must run as root"
-
-
-# ----------------------------------------------------------------------------
-# Boolean validation
-# ----------------------------------------------------------------------------
-
-validate_bool() {
-    local name="$1"
-    local value="$2"
-
-    case "$value" in
-        yes|no)
-            ;;
-        *)
-            die "${name} must be 'yes' or 'no', got '${value}'"
-            ;;
-    esac
-}
-
-validate_bool FEATURE_DISPLAY "$FEATURE_DISPLAY"
-validate_bool FEATURE_MPV "$FEATURE_MPV"
-validate_bool FEATURE_HDMI_HOTPLUG "$FEATURE_HDMI_HOTPLUG"
-validate_bool MIVA_INSTALL "$MIVA_INSTALL"
-validate_bool MIVA_NETWORK "$MIVA_NETWORK"
-
-
-# ----------------------------------------------------------------------------
-# Feature dependency resolution
-# ----------------------------------------------------------------------------
-
-if [[ "$FEATURE_MPV" == "yes" && "$FEATURE_DISPLAY" != "yes" ]]; then
-    log "FEATURE_MPV requires DISPLAY; enabling FEATURE_DISPLAY"
-    FEATURE_DISPLAY=yes
-fi
-
-if [[ "$FEATURE_HDMI_HOTPLUG" == "yes" && "$FEATURE_DISPLAY" != "yes" ]]; then
-    log "FEATURE_HDMI_HOTPLUG requires DISPLAY; enabling FEATURE_DISPLAY"
-    FEATURE_DISPLAY=yes
-fi
-
-
-# ----------------------------------------------------------------------------
-# State
-# ----------------------------------------------------------------------------
-
-mkdir -p "$STATE_DIR"
-
-
-mark_done() {
-    touch "${STATE_DIR}/$1.done"
-}
-
-
-is_done() {
-    [[ -f "${STATE_DIR}/$1.done" ]]
-}
-
-
-# ============================================================================
-# APT
-# ============================================================================
-
-configure_apt_network() {
-
-    log "Configuring APT to use IPv4"
+install_common_packages() {
+    done_stage packages && return 0
+    log "Installing common host packages"
 
     mkdir -p /etc/apt/apt.conf.d
-
-    cat >/etc/apt/apt.conf.d/99miva-force-ipv4 <<'EOF'
+    cat > /etc/apt/apt.conf.d/99miva-force-ipv4 <<'APT'
 Acquire::ForceIPv4 "true";
-EOF
-}
-
-
-apt_update_once() {
-
-    if [[ "$APT_UPDATED" == "yes" ]]; then
-        return 0
-    fi
-
-    log "Updating APT package lists"
+APT
 
     apt-get update
-
-    APT_UPDATED=yes
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        git curl wget ca-certificates inotify-tools cron jq net-tools
+    systemctl enable --now cron.service 2>/dev/null || true
+    mark_stage packages
 }
-
-
-install_pkgs() {
-
-    local missing=()
-    local pkg
-
-    for pkg in "$@"; do
-
-        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null \
-            | grep -q "install ok installed"; then
-
-            missing+=("$pkg")
-        fi
-    done
-
-    if [[ "${#missing[@]}" -eq 0 ]]; then
-        return 0
-    fi
-
-    log "Installing packages: ${missing[*]}"
-
-    apt_update_once
-
-    DEBIAN_FRONTEND=noninteractive \
-        apt-get install -y --no-install-recommends "${missing[@]}"
-}
-
-
-configure_apt_network
-
-
-# ============================================================================
-# PHASE 1
-# ============================================================================
-
-log "========================================"
-log "PHASE 1: HOST PREPARATION"
-log "========================================"
-
-
-# ----------------------------------------------------------------------------
-# Common dependencies
-# ----------------------------------------------------------------------------
-
-install_common() {
-
-    if is_done common; then
-        log "Common dependencies already installed"
-        return
-    fi
-
-    install_pkgs \
-        git \
-        curl \
-        ca-certificates \
-        inotify-tools \
-        cron
-
-    mark_done common
-}
-
-
-install_common
-
-
-# ----------------------------------------------------------------------------
-# Display
-# ----------------------------------------------------------------------------
 
 install_display() {
+    yesno "$FEATURE_DISPLAY" || return 0
+    done_stage display && return 0
 
-    if [[ "$FEATURE_DISPLAY" != "yes" ]]; then
-        log "FEATURE_DISPLAY=no; skipping display stack"
-        return
-    fi
+    log "Installing Xorg + Openbox display stack"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        xserver-xorg xinit openbox mesa-utils wmctrl x11-utils x11-xserver-utils fonts-cantarell
 
-    if is_done display; then
-        log "Display stack already installed"
-        return
-    fi
-
-    log "Installing Xorg/Openbox display stack"
-
-    install_pkgs \
-        xserver-xorg \
-        xinit \
-        openbox \
-        mesa-utils \
-        wmctrl \
-        x11-utils \
-        x11-xserver-utils \
-        fonts-cantarell
-
-    # ------------------------------------------------------------------------
-    # Openbox configuration
-    # ------------------------------------------------------------------------
-
-    mkdir -p /root/.config/openbox
-
-    if [[ ! -f /root/.config/openbox/autostart ]]; then
-        cat >/root/.config/openbox/autostart <<'EOF'
-# MIVA Openbox autostart
-
-xset -dpms
-xset s off
-xset s noblank
-EOF
-    fi
-
-    chmod +x /root/.config/openbox/autostart
-
-
-    # ------------------------------------------------------------------------
-    # Xorg/Openbox launcher
-    # ------------------------------------------------------------------------
-
-    cat >/usr/local/sbin/miva-xorg-openbox <<'EOF'
-#!/usr/bin/env bash
-set -e
-
-export DISPLAY=:0
-export XAUTHORITY=/root/.Xauthority
-
-exec startx /usr/bin/openbox-session -- :0 \
-    -nocursor \
-    -s 0 \
-    -dpms
-EOF
-
-    chmod 0755 /usr/local/sbin/miva-xorg-openbox
-
-
-    # ------------------------------------------------------------------------
-    # systemd
-    # ------------------------------------------------------------------------
-
-    cat >/etc/systemd/system/xorg-openbox.service <<'EOF'
+    cat > /etc/systemd/system/xorg-openbox.service <<'UNIT'
 [Unit]
-Description=MIVA Xorg + Openbox
-After=systemd-user-sessions.service
-Wants=systemd-user-sessions.service
+Description=Start Xorg with Openbox (as root)
+After=network.target
 
 [Service]
-Type=simple
-
+User=root
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/root/.Xauthority
-
-ExecStart=/usr/local/sbin/miva-xorg-openbox
-
+Environment=XDG_RUNTIME_DIR=/run/user/0
+WorkingDirectory=/root
+ExecStart=/usr/bin/X :0 vt1 -nolisten tcp
+ExecStartPost=/bin/bash -c 'sleep 1 && openbox-session &'
 Restart=always
-RestartSec=3
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
 
     systemctl daemon-reload
     systemctl enable xorg-openbox.service
-
-    mark_done display
-
-    log "Display stack installed"
+    mark_stage display
 }
-
-
-install_display
-
-
-# ----------------------------------------------------------------------------
-# MPV
-# ----------------------------------------------------------------------------
 
 install_mpv() {
+    yesno "$FEATURE_MPV" || return 0
+    done_stage mpv && return 0
 
-    if [[ "$FEATURE_MPV" != "yes" ]]; then
-        log "FEATURE_MPV=no; skipping MPV"
-        return
+    if ! yesno "$FEATURE_DISPLAY"; then
+        warn "FEATURE_MPV=yes requires display; enabling/installing display stack"
+        FEATURE_DISPLAY=yes
+        install_display
     fi
 
-    if is_done mpv; then
-        log "MPV already installed"
-        return
+    log "Installing MPV + FFmpeg"
+
+    # Preserve the previously used MIVA DRM-capable package source when available.
+    if wget -q http://apt.undo.it:7242/apt.undo.it.asc -O /etc/apt/trusted.gpg.d/apt.undo.it.asc; then
+        . /etc/os-release
+        echo "deb http://apt.undo.it:7242 $VERSION_CODENAME main" > /etc/apt/sources.list.d/apt.undo.it.list
+        cat > /etc/apt/preferences.d/apt-undo-it <<'PREF'
+Package: *
+Pin: release o=apt.undo.it
+Pin-Priority: 600
+PREF
+        apt-get update
+    else
+        warn "apt.undo.it unavailable; using distro MPV/FFmpeg packages"
+        rm -f /etc/apt/trusted.gpg.d/apt.undo.it.asc /etc/apt/sources.list.d/apt.undo.it.list /etc/apt/preferences.d/apt-undo-it
     fi
 
-    log "Installing MPV/FFmpeg"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y mpv ffmpeg
 
-    install_pkgs \
-        mpv \
-        ffmpeg
+    mkdir -p /etc/mpv
+    cat > /etc/mpv/mpv.conf <<'EOFMPV'
+hwdec=drm
+drm-drmprime-video-plane=primary
+drm-draw-plane=overlay
+audio-device=alsa/hw:2,0
+EOFMPV
 
-    mark_done mpv
+    usermod -aG render root 2>/dev/null || true
+    usermod -aG video root 2>/dev/null || true
+    mark_stage mpv
 }
 
-
-install_mpv
-
-
-# ----------------------------------------------------------------------------
-# HDMI hotplug
-# ----------------------------------------------------------------------------
-
 install_hdmi_hotplug() {
+    yesno "$FEATURE_HDMI_HOTPLUG" || return 0
+    done_stage hdmi && return 0
 
-    if [[ "$FEATURE_HDMI_HOTPLUG" != "yes" ]]; then
-        log "FEATURE_HDMI_HOTPLUG=no; skipping HDMI hotplug"
-        return
+    if ! yesno "$FEATURE_DISPLAY"; then
+        warn "FEATURE_HDMI_HOTPLUG=yes requires display; enabling/installing display stack"
+        FEATURE_DISPLAY=yes
+        install_display
     fi
 
-    if is_done hdmi; then
-        log "HDMI hotplug already installed"
-        return
-    fi
+    log "Installing HDMI hotplug handler"
 
-    log "Installing HDMI hotplug support"
-
-    # ------------------------------------------------------------------------
-    # HDMI handler
-    # ------------------------------------------------------------------------
-
-    cat >/usr/local/sbin/miva-hdmi-hotplug <<'EOF'
-#!/usr/bin/env bash
-
-export DISPLAY=:0
-export XAUTHORITY=/root/.Xauthority
-
-sleep 1
-
-if command -v xrandr >/dev/null 2>&1; then
-    xrandr --auto || true
+    cat > /usr/local/bin/hdmi-hotplug-handler.sh <<'EOFHDMI'
+#!/bin/bash
+set -u
+STATUS_FILE="/sys/class/drm/card0-HDMI-A-1/status"
+[[ -r "$STATUS_FILE" ]] || exit 0
+STATUS="$(cat "$STATUS_FILE")"
+if [[ "$STATUS" == "connected" ]]; then
+    logger "HDMI connected, setting resolution and restarting MPV"
+    export DISPLAY=:0
+    export XAUTHORITY=/root/.Xauthority
+    xrandr --output HDMI-1 --mode 1920x1080 --primary 2>/dev/null || true
+    [[ -x /usr/local/bin/mpv_init.sh ]] && /usr/local/bin/mpv_init.sh || true
 fi
-EOF
+EOFHDMI
+    chmod 0755 /usr/local/bin/hdmi-hotplug-handler.sh
 
-    chmod 0755 /usr/local/sbin/miva-hdmi-hotplug
-
-
-    # ------------------------------------------------------------------------
-    # systemd service
-    # ------------------------------------------------------------------------
-
-    cat >/etc/systemd/system/miva-hdmi-hotplug.service <<'EOF'
+    cat > /etc/systemd/system/hdmi-hotplug-handler.service <<'UNIT'
 [Unit]
-Description=MIVA HDMI hotplug handler
-After=xorg-openbox.service
+Description=Handle HDMI hotplug event
+After=multi-user.target
 
 [Service]
 Type=oneshot
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/root/.Xauthority
-ExecStart=/usr/local/sbin/miva-hdmi-hotplug
-EOF
+ExecStart=/usr/local/bin/hdmi-hotplug-handler.sh
 
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-    # ------------------------------------------------------------------------
-    # udev
-    #
-    # Do not assume a board-specific DRM event here.
-    # Existing board-specific HDMI rules can be installed separately.
-    # ------------------------------------------------------------------------
+    cat > /etc/udev/rules.d/99-hdmi-hotplug.rules <<'RULE'
+ACTION=="change", SUBSYSTEM=="drm", RUN+="/bin/systemctl start hdmi-hotplug-handler.service"
+RULE
 
     systemctl daemon-reload
-
-    mark_done hdmi
-
-    log "HDMI hotplug support installed"
+    systemctl enable hdmi-hotplug-handler.service
+    udevadm control --reload-rules
+    mark_stage hdmi
 }
 
+sync_upstream_source() {
+    yesno "$MIVA_INSTALL" || return 0
+    done_stage source && return 0
 
-install_hdmi_hotplug
+    log "Installing/updating MIVA upstream branch: $MIVA_BRANCH"
 
-
-log "========================================"
-log "PHASE 1: HOST PREPARATION COMPLETE"
-log "========================================"
-
-
-# ============================================================================
-# Stop here when MIVA application is disabled
-# ============================================================================
-
-if [[ "$MIVA_INSTALL" != "yes" ]]; then
-
-    log "MIVA_INSTALL=no"
-    log "Host preparation complete; skipping MIVA application"
-
-    exit 0
-fi
-
-
-# ============================================================================
-# PHASE 2
-# ============================================================================
-
-log "========================================"
-log "PHASE 2: MIVA UPSTREAM INSTALL"
-log "========================================"
-
-
-# ----------------------------------------------------------------------------
-# Clone/update upstream
-# ----------------------------------------------------------------------------
-
-install_miva_source() {
-
-    log "Preparing MIVA source"
-
-    if [[ -d "$MIVA_DIR/.git" ]]; then
-
-        log "Updating existing MIVA repository"
-
-        git -C "$MIVA_DIR" fetch origin "$MIVA_BRANCH"
-
-        git -C "$MIVA_DIR" checkout -B \
-            "$MIVA_BRANCH" \
-            "origin/$MIVA_BRANCH"
-
+    if [[ -d "$MIVA_HOME/.git" ]]; then
+        git -C "$MIVA_HOME" fetch --prune origin
+        git -C "$MIVA_HOME" checkout "$MIVA_BRANCH"
+        git -C "$MIVA_HOME" reset --hard "origin/$MIVA_BRANCH"
     else
-
-        if [[ -e "$MIVA_DIR" ]]; then
-            die "$MIVA_DIR exists but is not a Git repository"
+        if [[ -e "$MIVA_HOME" ]] && [[ -n "$(ls -A "$MIVA_HOME" 2>/dev/null || true)" ]]; then
+            die "$MIVA_HOME exists and is not an upstream Git checkout"
         fi
-
-        git clone \
-            --branch "$MIVA_BRANCH" \
-            --single-branch \
-            "$MIVA_REPO" \
-            "$MIVA_DIR"
+        rm -rf "$MIVA_HOME"
+        git clone --branch "$MIVA_BRANCH" --single-branch "$UPSTREAM_REPO" "$MIVA_HOME"
     fi
 
-    mark_done miva-source
+    [[ -d "$SETUP_DIR" ]] || die "Missing upstream setup directory"
+    [[ -d "$DOCKER_DIR" ]] || die "Missing upstream docker directory"
+    mark_stage source
 }
-
-
-install_miva_source
-
-
-# ----------------------------------------------------------------------------
-# MIVA core
-# ----------------------------------------------------------------------------
 
 install_miva_core() {
+    yesno "$MIVA_INSTALL" || return 0
+    done_stage core && return 0
 
-    log "Installing MIVA core host services"
+    log "Installing MIVA core host setup following upstream flow"
 
-    local setup="$MIVA_DIR/setup"
+    install -m 0755 "$SETUP_DIR/init_4g_module.sh" /usr/local/bin/init_4g_module.sh
+    install -m 0755 "$SETUP_DIR/netcfg-watcher.sh" /usr/local/bin/netcfg-watcher.sh
+    install -m 0755 "$SETUP_DIR/mpv_init.sh" /usr/local/bin/mpv_init.sh
 
-    [[ -d "$setup" ]] || die "Missing upstream setup directory"
+    mkdir -p /root/mgwp/network /root/mgwp/upgrade /root/mgwp/reboot
+    touch /root/mgwp/network/netplan.apply
+    touch /root/mgwp/upgrade/upgrade.tag
+    touch /root/mgwp/reboot/reboot.apply
 
+    install -m 0644 "$SETUP_DIR/netcfg-watcher.service" /etc/systemd/system/netcfg-watcher.service
+    install -m 0644 "$SETUP_DIR/pre-docker-gpio.service" /etc/systemd/system/pre-docker-gpio.service
 
-    # ------------------------------------------------------------------------
-    # 4G modem initialization
-    # ------------------------------------------------------------------------
+    cat > /etc/udev/rules.d/99-mm-ignore.rules <<'RULE'
+KERNEL=="ttyUSB1", ENV{ID_MM_DEVICE_IGNORE}="1"
+RULE
+    udevadm control --reload-rules
+    udevadm trigger || true
 
-    if [[ -f "$setup/init_4g_module.sh" ]]; then
-
-        install -m 0755 \
-            "$setup/init_4g_module.sh" \
-            /usr/local/bin/init_4g_module.sh
+    if yesno "$FEATURE_MPV"; then
+        local cron_line='*/1 * * * * /usr/local/bin/mpv_init.sh >> /tmp/mpv_init.log 2>&1'
+        ( crontab -l 2>/dev/null | grep -Fv '/usr/local/bin/mpv_init.sh' || true; echo "$cron_line" ) | crontab -
+    else
+        ( crontab -l 2>/dev/null | grep -Fv '/usr/local/bin/mpv_init.sh' || true ) | crontab -
     fi
-
-
-    # ------------------------------------------------------------------------
-    # pre-docker GPIO
-    # ------------------------------------------------------------------------
-
-    if [[ -f "$setup/pre-docker-gpio.service" ]]; then
-
-        install -m 0644 \
-            "$setup/pre-docker-gpio.service" \
-            /etc/systemd/system/pre-docker-gpio.service
-
-        systemctl enable pre-docker-gpio.service
-    fi
-
-
-    # ------------------------------------------------------------------------
-    # netcfg watcher
-    # ------------------------------------------------------------------------
-
-    if [[ -f "$setup/netcfg-watcher.sh" ]]; then
-
-        install -m 0755 \
-            "$setup/netcfg-watcher.sh" \
-            /usr/local/bin/netcfg-watcher.sh
-    fi
-
-
-    if [[ -f "$setup/netcfg-watcher.service" ]]; then
-
-        install -m 0644 \
-            "$setup/netcfg-watcher.service" \
-            /etc/systemd/system/netcfg-watcher.service
-
-        systemctl enable netcfg-watcher.service
-    fi
-
-
-    # ------------------------------------------------------------------------
-    # Runtime directories expected by MIVA
-    # ------------------------------------------------------------------------
-
-    mkdir -p \
-        /root/mgwp/network \
-        /root/mgwp/upgrade \
-        /root/mgwp/reboot
-
-
-    touch \
-        /root/mgwp/network/netplan.apply \
-        /root/mgwp/upgrade/upgrade.tag \
-        /root/mgwp/reboot/reboot.apply
-
-
-    # ------------------------------------------------------------------------
-    # MPV integration
-    # ------------------------------------------------------------------------
-
-    if [[ "$FEATURE_MPV" == "yes" && -f "$setup/mpv_init.sh" ]]; then
-
-        install -m 0755 \
-            "$setup/mpv_init.sh" \
-            /usr/local/bin/mpv_init.sh
-
-        CRON_LINE='* * * * * /usr/local/bin/mpv_init.sh >/dev/null 2>&1'
-
-        (
-            crontab -l 2>/dev/null \
-                | grep -Fv '/usr/local/bin/mpv_init.sh' || true
-
-            echo "$CRON_LINE"
-
-        ) | crontab -
-    fi
-
 
     systemctl daemon-reload
+    systemctl enable netcfg-watcher.service
+    systemctl enable pre-docker-gpio.service
 
-    mark_done miva-core
+    systemctl restart netcfg-watcher.service || warn "netcfg-watcher.service failed to start"
+    systemctl restart pre-docker-gpio.service || warn "pre-docker-gpio.service failed; modem may not be ready yet"
+
+    mark_stage core
 }
-
-
-install_miva_core
-
-
-# ============================================================================
-# Network configuration
-# ============================================================================
 
 install_miva_network() {
+    yesno "$MIVA_INSTALL" || return 0
+    yesno "$MIVA_NETWORK" || {
+        log "MIVA_NETWORK=no; keeping firmware-provisioned Netplan configuration"
+        return 0
+    }
+    done_stage network && return 0
 
-    if [[ "$MIVA_NETWORK" != "yes" ]]; then
-
-        log "MIVA_NETWORK=no"
-        log "Keeping firmware/bootstrap network configuration"
-
-        return
-    fi
-
-    log "Staging MIVA upstream network configuration"
-
-    local setup="$MIVA_DIR/setup"
-
-    for file in \
-        01-netcfg.yaml \
-        02-rndis.yaml \
-        03-uqmi.yaml
-    do
-        [[ -f "$setup/$file" ]] \
-            || die "Missing upstream network file: $file"
-    done
-
-
-    # MIVA now becomes owner of Netplan configuration.
+    log "Installing upstream MIVA Netplan files"
     rm -f /etc/netplan/*.yaml
+    cp "$SETUP_DIR/"*.yaml /etc/netplan/
+    chmod 0600 /etc/netplan/*.yaml
 
-
-    install -m 0600 \
-        "$setup/01-netcfg.yaml" \
-        /etc/netplan/01-netcfg.yaml
-
-    install -m 0600 \
-        "$setup/02-rndis.yaml" \
-        /etc/netplan/02-rndis.yaml
-
-    install -m 0600 \
-        "$setup/03-uqmi.yaml" \
-        /etc/netplan/03-uqmi.yaml
-
-
-    # Generate only.
-    #
-    # IMPORTANT:
-    # Do NOT netplan apply here because doing so can remove the Internet
-    # connection being used to pull the MIVA Docker image.
+    # Upstream setup_miva.sh copies the files but does not call netplan apply.
+    # Keep the current working connection alive so Docker pull can finish.
     netplan generate
-
-    mark_done miva-network
-
-    log "MIVA network configuration staged"
+    mark_stage network
 }
 
+start_miva_container() {
+    yesno "$MIVA_INSTALL" || return 0
+    done_stage container && return 0
 
-install_miva_network
+    command -v docker >/dev/null 2>&1 || die "Docker is missing from base firmware"
+    docker compose version >/dev/null 2>&1 || die "Docker Compose plugin is missing"
 
-
-# ============================================================================
-# Docker
-# ============================================================================
-
-install_miva_docker() {
-
-    local docker_dir="$MIVA_DIR/docker"
-
-    [[ -d "$docker_dir" ]] \
-        || die "Missing MIVA docker directory"
-
-
-    cd "$docker_dir"
-
-
-    # ------------------------------------------------------------------------
-    # Generate dynamic device mappings
-    # ------------------------------------------------------------------------
-
-    if [[ -f ./generate-devices.sh ]]; then
-
-        chmod +x ./generate-devices.sh
-
-        log "Generating Docker device mappings"
-
-        ./generate-devices.sh
-    fi
-
-
-    # ------------------------------------------------------------------------
-    # Compose
-    # ------------------------------------------------------------------------
-
-    if docker compose version >/dev/null 2>&1; then
-
-        COMPOSE=(docker compose)
-
-    elif command -v docker-compose >/dev/null 2>&1; then
-
-        COMPOSE=(docker-compose)
-
-    else
-
-        die "Docker Compose not found"
-    fi
-
+    log "Generating Docker device mapping"
+    cd "$DOCKER_DIR"
+    chmod +x generate-devices.sh
+    ./generate-devices.sh
 
     export TAG="$MIVA_TAG"
+    log "Validating Docker Compose for sonnh911/miva:${MIVA_TAG}"
+    docker compose config >/dev/null
 
-    log "Using Docker image tag: $TAG"
+    log "Pulling MIVA image"
+    docker compose pull
 
+    log "Starting MIVA container"
+    docker compose up -d
 
-    log "Validating Docker Compose configuration"
-
-    "${COMPOSE[@]}" config >/dev/null
-
-
-    log "Pulling MIVA Docker image"
-
-    "${COMPOSE[@]}" pull
-
-
-    log "Starting MIVA"
-
-    "${COMPOSE[@]}" up -d
-
-
-    # ------------------------------------------------------------------------
-    # Verify
-    # ------------------------------------------------------------------------
-
-    log "Verifying MIVA container"
-
-    local ok=no
-
-    for _ in $(seq 1 10); do
-
-        if docker ps --format '{{.Names}}' \
-            | grep -qx 'miva'; then
-
-            ok=yes
-            break
-        fi
-
-        sleep 2
-    done
-
-
-    "${COMPOSE[@]}" ps || true
-
-
-    if [[ "$ok" != "yes" ]]; then
-
-        docker ps -a || true
-
-        die "MIVA container is not running"
-    fi
-
-
-    mark_done miva-container
+    sleep 3
+    docker compose ps
+    docker ps --format '{{.Names}}' | grep -qx miva || die "MIVA container is not running"
+    mark_stage container
 }
 
+main() {
+    require_root
+    mkdir -p "$STATE_DIR"
 
-install_miva_docker
+    log "Configuration: branch=$MIVA_BRANCH tag=$MIVA_TAG display=$FEATURE_DISPLAY mpv=$FEATURE_MPV hdmi=$FEATURE_HDMI_HOTPLUG network=$MIVA_NETWORK"
 
+    install_common_packages
+    install_display
+    install_mpv
+    install_hdmi_hotplug
 
-# ============================================================================
-# Final verification
-# ============================================================================
+    if yesno "$MIVA_INSTALL"; then
+        sync_upstream_source
+        install_miva_core
+        install_miva_network
+        start_miva_container
+    else
+        log "MIVA_INSTALL=no; host feature setup only"
+    fi
 
-log "========================================"
-log "MIVA INSTALLATION COMPLETE"
-log "========================================"
+    log "MIVA first-boot application setup completed"
+}
 
-log "MIVA branch : $MIVA_BRANCH"
-log "MIVA tag    : $MIVA_TAG"
-log "Network     : $MIVA_NETWORK"
-
-docker ps --filter name=miva || true
-
-exit 0
+main "$@"
