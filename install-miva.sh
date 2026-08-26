@@ -265,6 +265,8 @@ start_miva_container() {
     chmod +x generate-devices.sh
     ./generate-devices.sh
 
+    sanitize_uart_devices
+
     export TAG="$MIVA_TAG"
     log "Validating Docker Compose for sonnh911/miva:${MIVA_TAG}"
     docker compose config >/dev/null
@@ -279,6 +281,38 @@ start_miva_container() {
     docker compose ps
     docker ps --format '{{.Names}}' | grep -qx miva || die "MIVA container is not running"
     mark_stage container
+}
+
+sanitize_uart_devices() {
+    local override="$DOCKER_DIR/docker-compose.override.yml"
+    local dev name path
+
+    [[ -f "$override" ]] || return 0
+
+    log "Sanitizing UART device mappings"
+
+    for dev in /dev/ttyS*; do
+        [[ -e "$dev" ]] || continue
+
+        name="${dev##*/}"
+        path="$(udevadm info -q path -n "$dev" 2>/dev/null || true)"
+
+        # Exclude serial8250 placeholder/non-SoC UARTs.
+        if [[ "$path" != *"/platform/soc/"*".serial/"* ]]; then
+            log "Exclude non-SoC UART from Docker: $dev"
+            sed -i "\|$dev|d" "$override"
+            continue
+        fi
+
+        # Exclude UART used by Linux kernel console.
+        if grep -Eq "(^|[[:space:]])console=${name}(,|[[:space:]]|$)" /proc/cmdline; then
+            log "Exclude host console UART from Docker: $dev"
+            sed -i "\|$dev|d" "$override"
+            continue
+        fi
+
+        log "Allow SoC UART in Docker: $dev"
+    done
 }
 
 main() {
