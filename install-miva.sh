@@ -5,13 +5,14 @@ UPSTREAM_REPO="https://github.com/smatecvn/miva.git"
 MIVA_HOME="/home/miva"
 SETUP_DIR="$MIVA_HOME/setup"
 DOCKER_DIR="$MIVA_HOME/docker"
-STATE_DIR="/var/lib/miva-firstboot"
+STATE_DIR="/var/lib/miva-app"
 
 MIVA_INSTALL="${MIVA_INSTALL:-yes}"
 MIVA_TAG="${MIVA_TAG:-${TAG:-latest}}"
 MIVA_BRANCH="${MIVA_BRANCH:-master}"
 FEATURE_DISPLAY="${FEATURE_DISPLAY:-yes}"
 FEATURE_MPV="${FEATURE_MPV:-yes}"
+FEATURE_HW_VIDEO="${FEATURE_HW_VIDEO:-yes}"
 FEATURE_HDMI_HOTPLUG="${FEATURE_HDMI_HOTPLUG:-yes}"
 MIVA_NETWORK="${MIVA_NETWORK:-yes}"
 
@@ -89,22 +90,33 @@ install_mpv() {
 
     log "Installing MPV + FFmpeg"
 
-    # Preserve the previously used MIVA DRM-capable package source when available.
-    if wget -q http://apt.undo.it:7242/apt.undo.it.asc -O /etc/apt/trusted.gpg.d/apt.undo.it.asc; then
-        . /etc/os-release
-        echo "deb http://apt.undo.it:7242 $VERSION_CODENAME main" > /etc/apt/sources.list.d/apt.undo.it.list
-        cat > /etc/apt/preferences.d/apt-undo-it <<'PREF'
+    if yesno "$FEATURE_HW_VIDEO"; then
+        log "FEATURE_HW_VIDEO=yes; enabling optional DRM/V4L2-request userspace repository"
+        if wget -q http://apt.undo.it:7242/apt.undo.it.asc -O /etc/apt/trusted.gpg.d/apt.undo.it.asc; then
+            . /etc/os-release
+            echo "deb http://apt.undo.it:7242 $VERSION_CODENAME main" > /etc/apt/sources.list.d/apt.undo.it.list
+            cat > /etc/apt/preferences.d/apt-undo-it <<'PREF'
 Package: *
 Pin: release o=apt.undo.it
 Pin-Priority: 600
 PREF
-        apt-get update
+            if ! apt-get update; then
+                warn "HW-video repository apt update failed; removing repository and falling back to distro packages"
+                rm -f /etc/apt/trusted.gpg.d/apt.undo.it.asc /etc/apt/sources.list.d/apt.undo.it.list /etc/apt/preferences.d/apt-undo-it
+                apt-get update
+            fi
+        else
+            warn "HW-video repository unavailable; using distro MPV/FFmpeg packages"
+            rm -f /etc/apt/trusted.gpg.d/apt.undo.it.asc /etc/apt/sources.list.d/apt.undo.it.list /etc/apt/preferences.d/apt-undo-it
+        fi
     else
-        warn "apt.undo.it unavailable; using distro MPV/FFmpeg packages"
         rm -f /etc/apt/trusted.gpg.d/apt.undo.it.asc /etc/apt/sources.list.d/apt.undo.it.list /etc/apt/preferences.d/apt-undo-it
     fi
 
     DEBIAN_FRONTEND=noninteractive apt-get install -y mpv ffmpeg
+    if yesno "$FEATURE_HW_VIDEO"; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y v4l-utils 2>/dev/null || true
+    fi
 
     mkdir -p /etc/mpv
     cat > /etc/mpv/mpv.conf <<'EOFMPV'
@@ -117,6 +129,32 @@ EOFMPV
     usermod -aG render root 2>/dev/null || true
     usermod -aG video root 2>/dev/null || true
     mark_stage mpv
+}
+
+check_hw_video() {
+    yesno "$FEATURE_HW_VIDEO" || return 0
+    done_stage hw-video && return 0
+
+    local available=no
+    if compgen -G '/dev/video*' >/dev/null; then
+        available=yes
+    elif dmesg 2>/dev/null | grep -qiE 'cedrus|v4l2.*(request|decoder)|video.*decoder'; then
+        available=yes
+    fi
+
+    mkdir -p "$STATE_DIR"
+    {
+        echo "FEATURE_HW_VIDEO=$FEATURE_HW_VIDEO"
+        echo "HW_VIDEO_AVAILABLE=$available"
+        echo "KERNEL=$(uname -r)"
+    } > "$STATE_DIR/hw-video.status"
+
+    if [[ "$available" == yes ]]; then
+        log "Kernel exposes a possible hardware-video decode interface"
+    else
+        warn "No kernel hardware-video decoder detected; MPV/FFmpeg remain available for software decode"
+    fi
+    mark_stage hw-video
 }
 
 install_hdmi_hotplug() {
@@ -265,8 +303,6 @@ start_miva_container() {
     chmod +x generate-devices.sh
     ./generate-devices.sh
 
-    sanitize_uart_devices
-
     export TAG="$MIVA_TAG"
     log "Validating Docker Compose for sonnh911/miva:${MIVA_TAG}"
     docker compose config >/dev/null
@@ -283,47 +319,16 @@ start_miva_container() {
     mark_stage container
 }
 
-sanitize_uart_devices() {
-    local override="$DOCKER_DIR/docker-compose.override.yml"
-    local dev name path
-
-    [[ -f "$override" ]] || return 0
-
-    log "Sanitizing UART device mappings"
-
-    for dev in /dev/ttyS*; do
-        [[ -e "$dev" ]] || continue
-
-        name="${dev##*/}"
-        path="$(udevadm info -q path -n "$dev" 2>/dev/null || true)"
-
-        # Exclude serial8250 placeholder/non-SoC UARTs.
-        if [[ "$path" != *"/platform/soc/"*".serial/"* ]]; then
-            log "Exclude non-SoC UART from Docker: $dev"
-            sed -i "\|$dev|d" "$override"
-            continue
-        fi
-
-        # Exclude UART used by Linux kernel console.
-        if grep -Eq "(^|[[:space:]])console=${name}(,|[[:space:]]|$)" /proc/cmdline; then
-            log "Exclude host console UART from Docker: $dev"
-            sed -i "\|$dev|d" "$override"
-            continue
-        fi
-
-        log "Allow SoC UART in Docker: $dev"
-    done
-}
-
 main() {
     require_root
     mkdir -p "$STATE_DIR"
 
-    log "Configuration: branch=$MIVA_BRANCH tag=$MIVA_TAG display=$FEATURE_DISPLAY mpv=$FEATURE_MPV hdmi=$FEATURE_HDMI_HOTPLUG network=$MIVA_NETWORK"
+    log "Configuration: branch=$MIVA_BRANCH tag=$MIVA_TAG display=$FEATURE_DISPLAY mpv=$FEATURE_MPV hw_video=$FEATURE_HW_VIDEO hdmi=$FEATURE_HDMI_HOTPLUG network=$MIVA_NETWORK"
 
     install_common_packages
     install_display
     install_mpv
+    check_hw_video
     install_hdmi_hotplug
 
     if yesno "$MIVA_INSTALL"; then
@@ -335,7 +340,7 @@ main() {
         log "MIVA_INSTALL=no; host feature setup only"
     fi
 
-    log "MIVA first-boot application setup completed"
+    log "MIVA application setup completed"
 }
 
 main "$@"
