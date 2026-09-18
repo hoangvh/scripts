@@ -36,4 +36,4 @@ Default: `TAG=latest`. Script tự clone upstream `smatecvn/miva` vào `/home/mi
 sudo -i
 bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/miva-h618-lpddr3_setup.sh)
 ```
-Script clone/cập nhật MIVA vào `/home/miva`, bỏ `--no-audio`, chạy `setup_miva.sh`, tạo `docker-compose.override.yml`, bỏ mapping `/dev/ttyS0`, pull image `TAG=latest`, tự nhận eMMC và chạy cài đặt không tương tác với filesystem `ext4`.
+Script clone/cập nhật MIVA vào `/home/miva`, bỏ `--no-audio`, chạy `setup_miva.sh`, tạo `docker-compose.override.yml`, bỏ mapping `/dev/ttyS0`, pull và khởi động image `TAG=latest`, tự nhận eMMC và chạy cài đặt không tương tác với filesystem `ext4`.

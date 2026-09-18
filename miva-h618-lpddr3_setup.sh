@@ -52,7 +52,7 @@ log "Vo hieu hoa mapping ttyS0 de tranh xung dot"
 sed -i -E 's/^([[:space:]]*)- "\/dev\/ttyS0"/\1# - "\/dev\/ttyS0"/' "$OVERRIDE"
 
 log "Pull image MIVA voi TAG=latest"
-(cd "$DOCKER_DIR" && export TAG=latest && docker compose pull)
+(cd "$DOCKER_DIR" && export TAG=latest && docker compose pull && docker compose up -d)
 
 install_to_emmc() {
     local root_source target type
