@@ -54,7 +54,31 @@ sed -i -E 's/^([[:space:]]*)- "\/dev\/ttyS0"/\1# - "\/dev\/ttyS0"/' "$OVERRIDE"
 log "Pull image MIVA voi TAG=latest"
 (cd "$DOCKER_DIR" && export TAG=latest && docker compose pull)
 
-log "Chuyen he thong tu SD sang eMMC bang armbian-install"
+install_to_emmc() {
+    local root_source target type
+
+    command -v armbian-install >/dev/null 2>&1 || die "Khong tim thay armbian-install."
+    armbian-install --help 2>&1 | grep -q -- '--target' || die "armbian-install qua cu, khong ho tro che do tu dong (--target/--yes)."
+
+    root_source="$(findmnt -n -o SOURCE / || true)"
+    target=""
+    for device in /sys/block/mmcblk*/device/type; do
+        [[ -r "$device" ]] || continue
+        type="$(<"$device")"
+        if [[ "$type" == "MMC" ]]; then
+            target="/dev/$(basename "$(dirname "$(dirname "$device")")")"
+            break
+        fi
+    done
+
+    [[ -b "$target" ]] || die "Khong tu tim thay thiet bi eMMC."
+    [[ "$root_source" != "$target" && "$root_source" != "$target"* ]] || die "Tu choi ghi: root dang nam tren $target."
+
+    log "Tu dong cai vao eMMC $target (ext4, boot emmc)"
+    armbian-install --target "$target" --boot emmc --fs ext4 --yes
+}
+
+log "Chuyen he thong tu SD sang eMMC khong tuong tac"
 export http_proxy="http://127.0.0.1:9"
 export https_proxy="http://127.0.0.1:9"
-armbian-install
+install_to_emmc
