@@ -30,3 +30,10 @@ Chọn Docker image tag:
 TAG=<tag> bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/refs/heads/main/install-miva.sh)
 ```
 Default: `TAG=latest`. Script tự clone upstream `smatecvn/miva` vào `/home/miva`, cài service/udev/cron, chuyển network sang netplan upstream (`01/02/03-netcfg.yaml`), `generate-devices.sh`, `docker compose pull` + `up -d`, rồi verify container.
+
+## 🚀 MIVA H618 LPDDR3, setup + chuẩn bị cài eMMC
+```bash
+sudo -i
+bash <(curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/miva-h618-lpddr3_setup.sh)
+```
+Script clone/cập nhật MIVA vào `/home/miva`, bỏ `--no-audio`, chạy `setup_miva.sh`, tạo `docker-compose.override.yml`, bỏ mapping `/dev/ttyS0`, pull image `TAG=latest`, rồi mở `armbian-install` để chọn eMMC.
