@@ -1,6 +1,6 @@
 # MIRA Docker runtime recovery
 
-Script `setup-mira-runtime.sh` tăng khả năng MIRA tự chạy lại sau khi host khởi động bất thường:
+Script [`setup-mira-runtime.sh`](../setup-mira-runtime.sh) tăng khả năng MIRA tự chạy lại sau khi host khởi động bất thường:
 
 - đổi `/home/mira/docker/docker-compose.yml` từ `restart: unless-stopped` thành `restart: always`;
 - cập nhật restart policy của container `mira` đang tồn tại;
@@ -16,7 +16,7 @@ Script có thể chạy lại nhiều lần. Khi cần sửa Compose, script t�
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/hoangvh/scripts/main/mira-docker-runtime/setup-mira-runtime.sh \
+  https://raw.githubusercontent.com/hoangvh/scripts/main/setup-mira-runtime.sh \
   -o /tmp/setup-mira-runtime.sh
 chmod 0755 /tmp/setup-mira-runtime.sh
 sh -n /tmp/setup-mira-runtime.sh
@@ -26,7 +26,7 @@ sh -n /tmp/setup-mira-runtime.sh
 Lệnh rút gọn (chỉ dùng khi đã kiểm tra nội dung script):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/mira-docker-runtime/setup-mira-runtime.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/setup-mira-runtime.sh | sh
 ```
 
 ## Cài offline khi thiết bị không có Internet
@@ -50,7 +50,7 @@ Nếu máy quản trị có Internet nhưng thiết bị không có Internet, t�
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/hoangvh/scripts/main/mira-docker-runtime/setup-mira-runtime.sh \
+  https://raw.githubusercontent.com/hoangvh/scripts/main/setup-mira-runtime.sh \
   -o setup-mira-runtime.sh
 scp setup-mira-runtime.sh root@192.168.11.102:/tmp/setup-mira-runtime.sh
 ssh root@192.168.11.102 'chmod 0755 /tmp/setup-mira-runtime.sh && sh -n /tmp/setup-mira-runtime.sh && /tmp/setup-mira-runtime.sh'

@@ -5,7 +5,7 @@
 Script đổi restart policy thành `always` và cài service retry MIRA sau khi Docker khởi động. Có hướng dẫn cài online và offline tại [mira-docker-runtime/README.md](mira-docker-runtime/README.md).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/mira-docker-runtime/setup-mira-runtime.sh -o /tmp/setup-mira-runtime.sh
+curl -fsSL https://raw.githubusercontent.com/hoangvh/scripts/main/setup-mira-runtime.sh -o /tmp/setup-mira-runtime.sh
 chmod 0755 /tmp/setup-mira-runtime.sh
 sh -n /tmp/setup-mira-runtime.sh
 /tmp/setup-mira-runtime.sh
